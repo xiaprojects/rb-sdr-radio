@@ -1,0 +1,29 @@
+[project]
+name = "rb-sdr-radio"
+version = "0.1.0"
+description = "Airband AM receiver for RB-Avionics (RTL-SDR, ALSA, Linux)"
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.26", "scipy>=1.11", "websockets>=12.0",
+                "aiohttp>=3.9", "jsonschema>=4.21"]
+
+[project.scripts]
+rb-sdr-radio = "rbsdrradio.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["rbsdrradio*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = ["alsa: needs the real aplay binary", "librtlsdr: needs the real librtlsdr shared library"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "C4", "SIM"]

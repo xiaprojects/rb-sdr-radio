@@ -1,0 +1,63 @@
+{
+  "$schema": "../schema/rb-sdr-radio.schema.json",
+  "version": "1.0",
+  "bridge": {
+    "ws_url": "ws://192.168.10.1/bridge/float/ws",
+    "rest_url": "http://192.168.10.1/bridge/float",
+    "ws_reconnect_min_s": 0.5,
+    "ws_reconnect_max_s": 30.0,
+    "ws_grace_s": 5.0,
+    "http_timeout_s": 0.8
+  },
+  "publish": {
+    "keepalive_s": 5.0,
+    "meter_period_s": 0.5,
+    "meter_deadband_db": 1.0
+  },
+  "sdr": {
+    "device_serial": "",
+    "device_index": 0,
+    "gain_mode": "manual",
+    "gain_db": 32.8,
+    "ppm": 0,
+    "swap_iq": false,
+    "tuner_profiles": {
+      "FC0012": { "gain_db": 19.2 },
+      "R820T": { "gain_db": 32.8 }
+    },
+    "settle_ms": 100,
+    "buffer_blocks": 8,
+    "block_samples": 32768,
+    "stall_s": 3.0,
+    "retry_s": 5.0
+  },
+  "radio": {
+    "volume": 50,
+    "squelch_db": 10,
+    "debounce_ms": 300
+  },
+  "squelch": {
+    "hysteresis_db": 3.0,
+    "open_blocks": 2,
+    "hang_s": 0.3
+  },
+  "audio": {
+    "device": "default",
+    "player": "aplay",
+    "buffer_ms": 150,
+    "retry_s": 5.0
+  },
+  "record": {
+    "enabled": true,
+    "dir": "/opt/stratux/www/playback",
+    "prefix": "radio",
+    "min_segment_s": 0.5,
+    "max_segment_s": 300,
+    "hold_s": 2.0,
+    "max_total_mb": 128,
+    "min_free_mb": 100
+  },
+  "log": {
+    "level": "INFO"
+  }
+}

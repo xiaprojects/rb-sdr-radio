@@ -1,0 +1,51 @@
+# RB-SDR-Radio airband receiver.
+# Installed by install.sh to /etc/systemd/system/rb-sdr-radio.service
+#
+# Runs as pi, like rbvoice, so that both see the same ALSA configuration: a dmix in
+# ~/.asoundrc belongs to the user who created it, and a second user cannot join it.
+
+[Unit]
+Description=RB-SDR-Radio airband receiver
+Documentation=https://github.com/xiaprojects/rb-sdr-radio
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/bin/python3 -m rbsdrradio --config /etc/rb-sdr-radio/rb-sdr-radio.json
+WorkingDirectory=/opt/rb-sdr-radio
+Environment=PYTHONUNBUFFERED=1
+# aplay reaches a PipeWire-based ALSA default through the user's runtime directory.
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+User=pi
+SupplementaryGroups=plugdev audio
+
+Restart=always
+RestartSec=2
+# The controller feeds the watchdog from its tick (10 Hz). A wedged event loop is
+# restarted rather than left looking like a quiet radio.
+WatchdogSec=10
+TimeoutStopSec=10
+
+CapabilityBoundingSet=
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=false
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+# Change this too if you move record.dir. systemd follows a symlink here, so this
+# covers the USB storage the build script links the folder to. The leading '-' keeps
+# the unit starting when it is absent; recording then shows as a fault, the radio
+# still plays.
+ReadWritePaths=-/opt/stratux/www/playback
+
+[Install]
+WantedBy=multi-user.target

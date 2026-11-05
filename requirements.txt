@@ -1,0 +1,12 @@
+# Runtime
+numpy>=1.26
+scipy>=1.11
+websockets>=12.0
+aiohttp>=3.9
+jsonschema>=4.21
+# librtlsdr and aplay are SYSTEM packages, not wheels:
+#   sudo apt install librtlsdr0 alsa-utils
+
+# Development
+pytest>=8.0
+ruff>=0.5

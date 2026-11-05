@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RB-SDR-Radio configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "bridge", "publish", "sdr", "radio", "squelch", "audio", "record", "log"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "const": "1.0" },
+    "bridge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ws_url", "rest_url", "ws_reconnect_min_s", "ws_reconnect_max_s", "ws_grace_s", "http_timeout_s"],
+      "properties": {
+        "ws_url": { "type": "string", "pattern": "^wss?://" },
+        "rest_url": { "type": "string", "pattern": "^https?://" },
+        "ws_reconnect_min_s": { "type": "number", "exclusiveMinimum": 0 },
+        "ws_reconnect_max_s": { "type": "number", "exclusiveMinimum": 0 },
+        "ws_grace_s": { "type": "number", "minimum": 0 },
+        "http_timeout_s": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "publish": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["keepalive_s", "meter_period_s", "meter_deadband_db"],
+      "properties": {
+        "keepalive_s": { "type": "number", "minimum": 0 },
+        "meter_period_s": { "type": "number", "exclusiveMinimum": 0 },
+        "meter_deadband_db": { "type": "number", "minimum": 0 }
+      }
+    },
+    "sdr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["device_serial", "device_index", "gain_mode", "gain_db", "ppm", "swap_iq", "settle_ms", "buffer_blocks", "block_samples", "stall_s", "retry_s"],
+      "properties": {
+        "device_serial": { "type": "string" },
+        "device_index": { "type": "integer", "minimum": 0 },
+        "gain_mode": { "enum": ["manual", "agc"] },
+        "gain_db": { "type": "number", "minimum": -10 },
+        "ppm": { "type": "integer", "minimum": -200, "maximum": 200 },
+        "swap_iq": { "type": "boolean" },
+        "tuner_profiles": {
+          "type": "object",
+          "propertyNames": { "enum": ["E4000", "FC0012", "FC0013", "FC2580", "R820T", "R828D"] },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "swap_iq": { "type": "boolean" },
+              "gain_db": { "type": "number", "minimum": -10 },
+              "ppm": { "type": "integer", "minimum": -200, "maximum": 200 },
+              "_note": { "type": "string" }
+            }
+          }
+        },
+        "settle_ms": { "type": "integer", "minimum": 0 },
+        "buffer_blocks": { "type": "integer", "minimum": 2, "maximum": 64 },
+        "block_samples": { "type": "integer", "minimum": 8192, "maximum": 131072, "multipleOf": 256 },
+        "stall_s": { "type": "number", "exclusiveMinimum": 0 },
+        "retry_s": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "radio": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["volume", "squelch_db", "debounce_ms"],
+      "properties": {
+        "volume": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "squelch_db": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "debounce_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "squelch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hysteresis_db", "open_blocks", "hang_s"],
+      "properties": {
+        "hysteresis_db": { "type": "number", "minimum": 0 },
+        "open_blocks": { "type": "integer", "minimum": 1 },
+        "hang_s": { "type": "number", "minimum": 0 }
+      }
+    },
+    "audio": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["device", "player", "buffer_ms", "retry_s"],
+      "properties": {
+        "device": { "type": "string", "minLength": 1 },
+        "player": { "type": "string", "minLength": 1 },
+        "buffer_ms": { "type": "integer", "minimum": 20 },
+        "retry_s": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "dir", "prefix", "min_segment_s", "max_segment_s", "hold_s", "max_total_mb", "min_free_mb"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "dir": { "type": "string", "minLength": 1 },
+        "prefix": { "type": "string", "pattern": "^[A-Za-z0-9-]+$" },
+        "min_segment_s": { "type": "number", "minimum": 0 },
+        "max_segment_s": { "type": "number", "exclusiveMinimum": 0 },
+        "hold_s": { "type": "number", "minimum": 0 },
+        "max_total_mb": { "type": "number", "exclusiveMinimum": 0 },
+        "min_free_mb": { "type": "number", "minimum": 0 }
+      }
+    },
+    "log": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["level"],
+      "properties": {
+        "level": { "enum": ["DEBUG", "INFO", "WARNING", "ERROR"] }
+      }
+    }
+  }
+}
