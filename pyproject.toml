@@ -18,6 +18,7 @@ include = ["rbsdrradio*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "-q --strict-markers"
 markers = ["alsa: needs the real aplay binary", "librtlsdr: needs the real librtlsdr shared library"]
 
