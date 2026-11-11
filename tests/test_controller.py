@@ -11,8 +11,10 @@ from rbsdrradio.audio import AudioError
 from rbsdrradio.controller import (
     FAULT_AUDIO,
     FAULT_FREQUENCY,
+    FAULT_HOP,
     FAULT_RECORD,
     FAULT_SDR,
+    FAULT_SECONDARY,
     Controller,
     State,
 )
@@ -34,6 +36,9 @@ class FakeSdr:
         self.fail = None
         self.streaming = True
         self.last_block_at = None
+        self.tuner = ""
+        self.dwells = []                  # (hz, samples) the watch asked to look at
+        self.streams = []                 # hz it asked for continuous blocks on
 
     def set_frequency(self, hz):
         if self.fail:
@@ -41,6 +46,12 @@ class FakeSdr:
         self.tuned.append(hz)
         self.is_open = True
         self.last_block_at = self.clock()
+
+    def dwell(self, hz, samples):
+        self.dwells.append((hz, samples))
+
+    def stream(self, hz):
+        self.streams.append(hz)
 
     def close(self):
         self.closes += self.is_open
@@ -297,6 +308,19 @@ def test_sound_device_held_while_tuned(rig):
     assert rig.pub.last["sdrradioaudio"] == 1
 
 
+def test_an_empty_audio_device_means_no_sound_card(cfg, clock):
+    """A Raspberry Pi 5 out of the box: no output, no fault, and the radio still records."""
+    rig = Rig(cfg.with_overrides(audio={"device": ""}), clock)
+    rig.c.set_squelch(10)
+    rig.tune()
+    rig.receive()
+    rig.run(10.0)
+    assert rig.audio.opens == 0 and not rig.audio.writes
+    assert rig.pub.last["sdrradioaudio"] == 0
+    assert not rig.pub.last["sdrradiofault"] & FAULT_AUDIO
+    assert rig.rec.fed
+
+
 def test_volume_zero_releases_the_sound_device_at_once(rig):
     rig.tune()
     rig.c.set_volume(0)                    # no tick: synchronous with the command
@@ -466,6 +490,27 @@ def test_record_off_stops_at_once(rig):
     rig.receive()
     assert len(rig.rec.fed) == fed
     assert rig.pub.last["sdrradiorecordactive"] == 0
+
+
+def test_demod_options_come_from_the_config(cfg, clock):
+    rig = Rig(cfg.with_overrides(demod={"detector": "synchronous", "noise_reduction_db": 9}),
+              clock)
+    assert rig.c.demod.detector == "synchronous" and rig.c.demod._nr.reduction_db == 9
+    # The dual watch look only reads S/N: no audio options inside a 29 ms hop.
+    assert rig.c.scan_demod.detector == "envelope" and rig.c.scan_demod._nr is None
+
+
+def test_demod_options_off_by_default(cfg, clock):
+    rig = Rig(cfg, clock)
+    assert rig.c.demod.detector == "envelope" and rig.c.demod._nr is None
+
+
+def test_noise_reduction_reaches_the_listener_and_the_recording(cfg, clock):
+    rig = Rig(cfg.with_overrides(demod={"detector": "synchronous", "noise_reduction_db": 12}),
+              clock)
+    rig.tune()
+    rig.receive()
+    assert rig.audio.writes and rig.rec.fed
 
 
 def test_record_on_from_the_config(cfg, clock):
@@ -674,3 +719,306 @@ def test_shutdown_releases_everything(rig):
 def test_demod_block_rate_matches_the_squelch(rig, cfg):
     assert rig.c.squelch._hang_blocks == round(cfg.squelch["hang_s"] / (BLOCK / 1_024_000))
     assert isinstance(rig.c.demod, AmDemod)
+
+
+# -- navaid band ---------------------------------------------------------------- #
+
+def test_a_navaid_channel_is_received_but_not_recorded(rig):
+    """Its carrier never stops: it would push real traffic out of the quota."""
+    rig.c.set_squelch(10)
+    rig.tune(113.8)
+    assert rig.sdr.tuned == [113_800_000]
+    assert rig.pub.last["sdrradiofreqactive"] == 113_800
+    rig.receive()
+    assert rig.c.state is State.RECEIVING
+    assert rig.rec.fed == []
+
+
+# -- dual watch ----------------------------------------------------------------- #
+
+PRIMARY_HZ, SECONDARY_HZ = 118_700_000, 121_500_000
+DWELL = 16_384
+DWELL_CARRIER = CARRIER[0][:DWELL]
+DWELL_QUIET = QUIET[0][:DWELL]
+
+
+def watching(rig):
+    rig.c.set_squelch(10)
+    rig.c.set_secondary(121.5)
+    rig.tune()
+    rig.run(0.4)
+    assert rig.c.watch is not None
+    assert rig.sdr.dwells[-1] == (PRIMARY_HZ, DWELL)
+
+
+def look(rig, iq, hz):
+    rig.c.push_dwell(iq, hz)
+    rig.sdr.last_block_at = rig.clock()
+
+
+def lock_on_secondary(rig):
+    look(rig, DWELL_QUIET, PRIMARY_HZ)
+    assert rig.sdr.dwells[-1] == (SECONDARY_HZ, DWELL)
+    look(rig, DWELL_CARRIER, SECONDARY_HZ)
+    look(rig, DWELL_CARRIER, SECONDARY_HZ)
+    assert rig.sdr.streams[-1] == SECONDARY_HZ
+
+
+def test_with_no_secondary_the_watch_does_not_exist(rig):
+    rig.tune()
+    rig.receive()
+    rig.run(5.0)
+    assert rig.c.watch is None
+    assert rig.sdr.dwells == [] and rig.sdr.streams == []
+    assert rig.pub.last["sdrradiosecondaryactive"] == 0
+
+
+def test_a_secondary_starts_scanning_and_is_reported(rig):
+    watching(rig)
+    assert rig.pub.last["sdrradiosecondaryactive"] == 121_500
+    assert rig.pub.last["sdrradiofreqactive"] == 118_700
+
+
+def test_the_secondary_is_debounced_through_what_a_spinner_passes(rig):
+    rig.c.set_squelch(10)
+    rig.tune()
+    for mhz in (119.0, 0, 119.025, 0, 119.05):
+        rig.c.set_secondary(mhz)
+        rig.run(0.1)
+    rig.run(0.5)
+    assert rig.c.secondary.name_khz == 119_050
+    assert rig.c.faults == 0
+
+
+def test_zero_stops_the_watching_and_goes_back_to_the_primary(rig):
+    watching(rig)
+    lock_on_secondary(rig)
+    rig.c.set_secondary(0)
+    rig.run(0.5)
+    assert rig.c.watch is None
+    assert rig.sdr.streams[-1] == PRIMARY_HZ
+    assert rig.pub.last["sdrradiosecondaryactive"] == 0
+    assert rig.pub.last["sdrradiofreqheard"] == 0
+
+
+def test_a_bad_secondary_leaves_the_primary_alone(rig):
+    rig.tune()
+    rig.c.set_secondary(118.02)
+    rig.run(0.5)
+    assert rig.c.channel.name_khz == 118_700 and rig.c.state is State.LISTENING
+    assert rig.sdr.is_open and rig.c.watch is None
+    assert rig.pub.last["sdrradiofault"] & FAULT_SECONDARY
+    rig.c.set_secondary(0)
+    rig.run(0.5)
+    assert rig.pub.last["sdrradiofault"] == 0
+
+
+def test_the_same_channel_twice_is_not_two_channels(rig):
+    rig.c.set_squelch(10)
+    rig.c.set_secondary(118.7)
+    rig.tune(118.7)
+    rig.run(0.5)
+    assert rig.c.watch is None
+
+
+def test_a_name_on_the_same_frequency_is_not_a_second_channel(rig):
+    rig.c.set_squelch(10)
+    rig.c.set_secondary(118.03)                # tunes 118.025, as does the primary
+    rig.tune(118.025)
+    rig.run(0.5)
+    assert rig.c.watch is None
+
+
+def test_the_squelch_test_stays_on_the_primary(rig):
+    """Held open, every dwell would find a signal."""
+    watching(rig)
+    rig.c.set_squelch(0)
+    rig.run(0.2)
+    assert rig.c.watch is None
+    assert rig.sdr.streams[-1] == PRIMARY_HZ
+    rig.c.set_squelch(10)
+    rig.run(0.2)
+    assert rig.c.watch is not None
+
+
+def test_hops_never_reach_the_bridge(rig):
+    watching(rig)
+    rig.pub.seen.clear()
+    for _ in range(100):
+        looking = rig.c.watch.looking
+        look(rig, DWELL_QUIET, looking.freq_hz)
+    assert len({json.dumps(payload, sort_keys=True) for payload in rig.pub.seen}) == 1
+    assert rig.pub.last["sdrradiostatus"] == 3
+    assert rig.pub.last["sdrradiosignal"] == 0 and rig.pub.last["sdrradiosnr"] == 0
+
+
+def test_a_signal_on_the_secondary_is_heard_and_reported(rig):
+    watching(rig)
+    lock_on_secondary(rig)
+    assert rig.c.state is State.RECEIVING
+    assert rig.pub.last["sdrradiostatus"] == 4
+    assert rig.pub.last["sdrradiofreqheard"] == 121_500
+    assert rig.pub.last["sdrradiofreqactive"] == 118_700
+    rig.audio.writes.clear()
+    rig.receive()
+    assert any(np.frombuffer(pcm, "<i2").any() for pcm in rig.audio.writes)
+    assert {khz for _, _, khz in rig.rec.fed} == {121_500}
+
+
+def test_a_confirmed_lock_does_not_wait_for_the_squelch_again(rig):
+    watching(rig)
+    lock_on_secondary(rig)
+    rig.receive(CARRIER[:1])
+    assert any(gate for _, gate, _ in rig.rec.fed)
+
+
+def test_a_dwell_on_the_wrong_channel_is_dropped(rig):
+    watching(rig)
+    before = list(rig.sdr.dwells)
+    look(rig, DWELL_CARRIER, SECONDARY_HZ)     # the watch is looking at the primary
+    assert rig.sdr.dwells == before
+
+
+def test_a_dwell_with_no_watch_is_dropped(rig):
+    rig.tune()
+    look(rig, DWELL_CARRIER, PRIMARY_HZ)
+    assert rig.sdr.dwells == []
+
+
+def test_blocks_queued_before_a_hop_are_dropped_while_scanning(rig):
+    watching(rig)
+    rig.receive()
+    assert rig.c.state is State.LISTENING and rig.rec.fed == []
+
+
+def test_silence_goes_out_for_the_blind_time(rig):
+    """Audio stops while the tuner is away, and the player must not run dry."""
+    watching(rig)
+    look(rig, DWELL_QUIET, PRIMARY_HZ)
+    rig.audio.writes.clear()
+    rig.clock.advance(0.05)
+    look(rig, DWELL_QUIET, SECONDARY_HZ)
+    assert sum(len(pcm) for pcm in rig.audio.writes) == 2 * 800      # 50 ms at 16 kHz
+    assert not any(np.frombuffer(pcm, "<i2").any() for pcm in rig.audio.writes)
+
+
+def test_a_look_back_silences_and_then_resumes_the_same_lock(rig):
+    watching(rig)
+    lock_on_secondary(rig)
+    rig.receive(CARRIER[:3])
+    rig.clock.advance(rig.c.cfg.dual["uninterrupted_s"])
+    rig.receive(CARRIER[:1])
+    assert rig.sdr.dwells[-1] == (PRIMARY_HZ, DWELL)
+    sigma2 = rig.c.demod._meter.sigma2
+    assert sigma2 is not None
+    look(rig, DWELL_QUIET, PRIMARY_HZ)
+    assert rig.sdr.streams[-1] == SECONDARY_HZ
+    assert rig.c.demod._meter.sigma2 == sigma2
+    assert rig.c.state is State.RECEIVING
+    assert rig.pub.last["sdrradiofreqheard"] == 121_500
+
+
+def test_a_call_on_the_secondary_keeps_the_tuner_there(rig):
+    """No look back while the squelch is open: each would be a pop in the call."""
+    watching(rig)
+    lock_on_secondary(rig)
+    dwells = len(rig.sdr.dwells)
+    for _ in range(int(10.0 / 0.032)):
+        rig.clock.advance(0.032)
+        rig.receive(CARRIER[:1])
+    assert len(rig.sdr.dwells) == dwells
+    assert rig.sdr.streams[-1] == SECONDARY_HZ
+    assert rig.c.state is State.RECEIVING
+
+
+def test_the_primary_interrupts_the_secondary(rig):
+    watching(rig)
+    lock_on_secondary(rig)
+    rig.receive(CARRIER[:1])
+    rig.clock.advance(rig.c.cfg.dual["uninterrupted_s"])
+    rig.receive(CARRIER[:1])
+    look(rig, DWELL_CARRIER, PRIMARY_HZ)
+    look(rig, DWELL_CARRIER, PRIMARY_HZ)
+    assert rig.sdr.streams[-1] == PRIMARY_HZ
+    assert rig.pub.last["sdrradiofreqheard"] == 118_700
+
+
+def test_the_end_of_a_hold_goes_back_to_scanning_on_the_primary(rig):
+    watching(rig)
+    look(rig, DWELL_CARRIER, PRIMARY_HZ)
+    look(rig, DWELL_CARRIER, PRIMARY_HZ)
+    rig.receive(CARRIER[:3])
+    for _ in range(80):
+        rig.clock.advance(0.032)
+        rig.receive(QUIET[:1])
+        if rig.c.watch.locked is None:
+            break
+    assert rig.c.watch.locked is None
+    assert rig.sdr.dwells[-1] == (PRIMARY_HZ, DWELL)
+    assert rig.c.state is State.LISTENING
+    assert rig.pub.last["sdrradiosignal"] == 0 and rig.pub.last["sdrradiosnr"] == 0
+
+
+def test_a_retune_starts_the_watch_again_on_the_new_primary(rig):
+    watching(rig)
+    lock_on_secondary(rig)
+    rig.c.set_frequency(119.0)
+    rig.run(0.4)
+    assert rig.sdr.tuned[-1] == 119_000_000
+    rig.run(0.2)
+    assert rig.c.watch.primary.name_khz == 119_000
+    assert rig.sdr.dwells[-1] == (119_000_000, DWELL)
+
+
+def test_frequency_zero_ends_the_watching(rig):
+    watching(rig)
+    rig.c.set_frequency(0)
+    rig.run(0.2)
+    assert rig.c.watch is None and not rig.sdr.is_open
+    assert rig.pub.last["sdrradiosecondaryactive"] == 0
+
+
+def test_a_stalled_sdr_ends_the_watching_and_it_comes_back(rig):
+    watching(rig)
+    rig.sdr.streaming = False
+    rig.run(3.5)
+    assert rig.c.state is State.FAULT and rig.c.watch is None
+    rig.sdr.streaming = True
+    rig.run(6.0)
+    assert rig.c.watch is not None
+
+
+def test_failed_hops_fall_back_to_the_primary_and_try_again(rig):
+    watching(rig)
+    limit = rig.c.cfg.dual["hop_fail_limit"]
+    for _ in range(limit):
+        look(rig, np.empty(0, dtype=np.complex64), rig.c.watch.looking.freq_hz)
+    assert rig.c.watch is None
+    assert rig.sdr.streams[-1] == PRIMARY_HZ
+    assert rig.pub.last["sdrradiofault"] & FAULT_HOP
+    assert rig.pub.last["sdrradiosecondaryactive"] == 0
+    assert rig.c.state is State.LISTENING
+    rig.run(rig.c.cfg.sdr["retry_s"] + 0.2)
+    assert rig.c.watch is not None
+    assert rig.pub.last["sdrradiofault"] == 0
+
+
+def test_one_failed_hop_is_only_a_lost_look(rig):
+    watching(rig)
+    empty = np.empty(0, dtype=np.complex64)
+    for _ in range(20):
+        look(rig, empty, rig.c.watch.looking.freq_hz)
+        look(rig, DWELL_QUIET, rig.c.watch.looking.freq_hz)
+    assert rig.c.watch is not None and rig.c.faults == 0
+
+
+def test_an_unmeasured_tuner_runs_with_a_warning(rig, caplog):
+    rig.sdr.tuner = "FC0012"
+    watching(rig)
+    assert "measured only on an R820T" in caplog.text
+
+
+def test_the_measured_tuner_runs_without_one(rig, caplog):
+    rig.sdr.tuner = "R820T"
+    watching(rig)
+    assert "measured only" not in caplog.text

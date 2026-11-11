@@ -46,11 +46,22 @@ class Squelch:
         if self.forced:
             self.open = True
 
+    def open_now(self) -> None:
+        """Open without waiting for `open_blocks`: dual watch has already confirmed a
+        signal, and two more blocks would clip what it found."""
+        self.open, self._above, self._below = True, 0, 0
+
+    @property
+    def close_at_db(self) -> float:
+        """Where an open gate shuts. Hysteresis is at most half the threshold: S/N never
+        reads below 0, so a gate set to 3 dB with 3 dB of hysteresis would never shut."""
+        return self.threshold_db - min(self.params.hysteresis_db, self.threshold_db / 2.0)
+
     def update(self, snr_db: float) -> bool:
         if self.forced:
             self.open = True
         elif self.open:
-            close_at = self.threshold_db - self.params.hysteresis_db
+            close_at = self.close_at_db
             self._below = self._below + 1 if snr_db < close_at else 0
             if self._below >= self._hang_blocks:
                 self.open, self._above = False, 0

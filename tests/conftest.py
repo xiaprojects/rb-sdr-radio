@@ -16,11 +16,13 @@ BLOCK = 32768
 
 @pytest.fixture
 def cfg(tmp_path):
-    """The shipped configuration, recording into a temporary folder."""
+    """The shipped configuration, recording into a temporary folder, with a sound device:
+    the shipped one has none, and most tests are about what happens to the audio."""
     raw = json.loads(SHIPPED_PATH.read_text())
     raw = copy.deepcopy(raw)
     raw["record"]["dir"] = str(tmp_path / "playback")
     raw["record"]["min_free_mb"] = 0
+    raw["audio"]["device"] = "default"
     return Config(raw, SHIPPED_PATH)
 
 

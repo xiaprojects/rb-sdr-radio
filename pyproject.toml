@@ -1,6 +1,6 @@
 [project]
 name = "rb-sdr-radio"
-version = "0.1.0"
+version = "0.2.0"
 description = "Airband AM receiver for RB-Avionics (RTL-SDR, ALSA, Linux)"
 requires-python = ">=3.11"
 dependencies = ["numpy>=1.26", "scipy>=1.11", "websockets>=12.0",

@@ -36,13 +36,25 @@
     "squelch_db": 10,
     "debounce_ms": 300
   },
+  "dual": {
+    "hold_s": 2.0,
+    "lookback_s": 1.0,
+    "uninterrupted_s": 30.0,
+    "dwell_samples": 16384,
+    "fill_samples": 3072,
+    "hop_fail_limit": 3
+  },
   "squelch": {
     "hysteresis_db": 3.0,
     "open_blocks": 2,
     "hang_s": 0.3
   },
+  "demod": {
+    "detector": "envelope",
+    "noise_reduction_db": 0
+  },
   "audio": {
-    "device": "default",
+    "device": "",
     "player": "aplay",
     "buffer_ms": 150,
     "retry_s": 5.0

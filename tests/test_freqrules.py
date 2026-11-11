@@ -8,6 +8,7 @@ import pytest
 from rbsdrradio.freqrules import (
     BAND_MAX_KHZ,
     BAND_MIN_KHZ,
+    COM_MIN_KHZ,
     SPACING_25,
     SPACING_833,
     all_channels,
@@ -45,14 +46,48 @@ def test_names_that_are_not_channels(last_digits):
 
 def test_band_holds_760_25khz_and_2280_833khz_channels():
     """19 MHz of band: the two plans' channel counts are published figures."""
-    channels = all_channels()
+    channels = [c for c in all_channels() if not c.nav]
     assert sum(c.spacing == SPACING_25 for c in channels) == 760
     assert sum(c.spacing == SPACING_833 for c in channels) == 2280
+
+
+def test_navaid_band_holds_200_channels_on_the_50khz_grid():
+    channels = [c for c in all_channels() if c.nav]
+    assert len(channels) == 200
+    assert channels[0].name_khz == 108_000 and channels[-1].name_khz == 117_950
+    for c in channels:
+        assert c.freq_hz == c.name_khz * 1000       # the name is the frequency here
+        assert c.spacing == SPACING_25
+
+
+@pytest.mark.parametrize("mhz", [108.0, 108.05, 108.1, 109.4, 113.8, 117.95])
+def test_navaid_channels_are_channels(mhz):
+    channel, reason = parse_channel(mhz)
+    assert reason == "" and channel is not None and channel.nav
+
+
+@pytest.mark.parametrize("mhz", [108.005, 108.025, 108.03, 117.975, 117.99])
+def test_only_the_50khz_grid_exists_below_118(mhz):
+    channel, reason = parse_channel(mhz)
+    assert channel is None
+    assert "not a 50 kHz navaid channel" in reason
+
+
+def test_below_the_navaid_band_is_refused():
+    channel, reason = parse_channel(107.95)
+    assert channel is None
+    assert "outside the band" in reason
+
+
+def test_the_com_band_is_not_navaid():
+    assert not channel_from_name(118_000).nav
 
 
 def test_every_frequency_is_on_the_833_grid_and_inside_the_band():
     step = 25_000 / 3
     for c in all_channels():
+        if c.nav:
+            continue
         assert 118_000_000 <= c.freq_hz < 137_000_000
         grid = (c.freq_hz - 118_000_000) / step
         assert abs(grid - round(grid)) * step <= 1.0, c
@@ -64,11 +99,11 @@ def test_band_edges_accepted(mhz, expected):
     assert parse_channel(mhz)[0].name_khz == expected
 
 
-@pytest.mark.parametrize("mhz", [117.975, 117.0, 137.0, 137.025, 108.0, 0.1, 1090.0])
+@pytest.mark.parametrize("mhz", [107.95, 137.0, 137.025, 0.1, 1090.0])
 def test_out_of_band_rejected(mhz):
     channel, reason = parse_channel(mhz)
     assert channel is None
-    assert "outside the COM band" in reason
+    assert "outside the band" in reason
 
 
 def test_every_channel_survives_the_float32_bridge():
@@ -90,5 +125,6 @@ def test_junk_is_rejected_without_raising(value):
 
 def test_labels():
     assert channel_from_name(118_030).label == "118.030"
-    assert channel_from_name(BAND_MIN_KHZ).label == "118.000"
+    assert channel_from_name(BAND_MIN_KHZ).label == "108.000"
+    assert channel_from_name(COM_MIN_KHZ).label == "118.000"
     assert channel_from_name(BAND_MAX_KHZ).label == "136.990"

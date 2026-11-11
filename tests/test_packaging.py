@@ -13,7 +13,7 @@ from rbsdrradio.config import SHIPPED_PATH
 from rbsdrradio.publisher import FIELDS
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = (ROOT / "docs" / "RB-SDR-RADIO-IF-v1.0.md").read_text()
+SPEC = (ROOT / "docs" / "RB-SDR-RADIO-IF-v1.1.md").read_text()
 UNIT = (ROOT / "systemd" / "rb-sdr-radio.service").read_text()
 INSTALL = ROOT / "install.sh"
 
@@ -51,7 +51,7 @@ def test_install_script_copies_everything_that_exists():
 
 def test_unit_runs_the_real_module():
     assert service()["ExecStart"].split()[-3:] == [
-        "rbsdrradio", "--config", "/etc/rb-sdr-radio/rb-sdr-radio.json"]
+        "rbsdrradio", "--config", "/boot/firmware/rb/rb-sdr-radio.json"]
 
 
 def test_unit_may_write_the_default_recording_folder():

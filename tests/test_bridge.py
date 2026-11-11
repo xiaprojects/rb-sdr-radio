@@ -260,3 +260,8 @@ def test_mock_stores_float32():
             assert bridge.state["sdrradiofreq"] == pytest.approx(118.03, abs=1e-5)
 
     asyncio.run(main())
+
+
+def test_the_secondary_frequency_is_a_command():
+    assert parse_frame('{"sdrradiofreqsecondary": 121.5}').values == {"secondary": 121.5}
+    assert parse_frame('{"sdrradiofreqsecondary": 0}').values == {"secondary": 0.0}

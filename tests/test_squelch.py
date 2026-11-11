@@ -28,6 +28,23 @@ def test_one_noise_spike_does_not_open_it():
     assert s.update(30.0) is False
 
 
+@pytest.mark.parametrize("threshold", [1.0, 2.0, 3.0])
+def test_a_low_threshold_still_shuts_on_noise(threshold):
+    """S/N never reads below 0, so 3 dB of hysteresis under a 3 dB threshold would
+    never shut: the gate held open on the first flight tests."""
+    s = make(threshold)
+    s.update(threshold)
+    assert s.update(threshold) is True
+    for _ in range(HANG_BLOCKS):
+        s.update(0.0)
+    assert s.open is False
+
+
+def test_hysteresis_is_at_most_half_the_threshold():
+    assert make(3.0).close_at_db == 1.5
+    assert make(10.0).close_at_db == 7.0
+
+
 def test_two_blocks_open_it():
     s = make()
     s.update(12.0)

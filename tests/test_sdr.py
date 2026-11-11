@@ -8,6 +8,7 @@ import ctypes.util
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -191,6 +192,185 @@ def test_read_errors_are_counted_and_not_fatal():
     reader.close()
 
 
+# -- dual watch: hops in the reader thread ---------------------------------------- #
+
+class HopDevice(FakeDevice):
+    """Remembers every call, and which channel each read came from."""
+
+    def __init__(self):
+        super().__init__(self._samples)
+        self.calls = []
+        self.reads = []
+        self.fail_tuning = False
+
+    def _samples(self, n):
+        time.sleep(0.001)
+        self.reads.append((self.freq_hz, n))
+        return np.full(n, self.freq_hz / 1e12, dtype=np.complex64)
+
+    def set_frequency(self, hz):
+        if self.fail_tuning:
+            raise SdrError("usb error")
+        self.calls.append(("tune", hz))
+        super().set_frequency(hz)
+
+    def reset_buffer(self):
+        self.calls.append(("reset", 0))
+
+
+def tuned_reader(device):
+    reader = SdrReader(reader_config(), opener=lambda c: device)
+    reader.set_frequency(118_700_000)
+    return reader
+
+
+def wait_for_dwell(reader):
+    found = []
+
+    def arrived():
+        found.append(reader.take_dwell())
+        return found[-1] is not None
+    assert wait_until(arrived)
+    return found[-1]
+
+
+def test_with_no_request_the_reader_never_hops():
+    """One channel is exactly the path it always was."""
+    device = HopDevice()
+    reader = tuned_reader(device)
+    assert wait_until(lambda: len(device.reads) > 20)
+    reader.close()
+    assert device.calls == [("tune", 118_700_000 + TUNER_OFFSET_HZ)]
+    assert reader.hops == 0 and reader.dwells == 0
+    assert {n for _, n in device.reads} == {reader.block_samples}
+
+
+def test_a_dwell_hops_resets_and_reads_once():
+    device = HopDevice()
+    reader = tuned_reader(device)
+    device.calls.clear()
+    reader.dwell(121_500_000, 2048)
+    block, hz = wait_for_dwell(reader)
+    assert hz == 121_500_000 and block.size == 2048
+    assert device.calls == [("tune", 121_500_000 + TUNER_OFFSET_HZ), ("reset", 0)]
+    assert device.reads[-1] == (121_500_000 + TUNER_OFFSET_HZ, 2048)
+    assert reader.take_dwell() is None
+    reader.close()
+
+
+def test_the_reader_waits_for_the_next_decision_after_a_dwell():
+    device = HopDevice()
+    reader = tuned_reader(device)
+    reader.dwell(121_500_000, 2048)
+    wait_for_dwell(reader)
+    time.sleep(0.03)
+    device.reads.clear()
+    time.sleep(0.03)
+    assert device.reads == []
+    reader.close()
+
+
+def test_a_confirming_look_does_not_retune():
+    device = HopDevice()
+    reader = tuned_reader(device)
+    reader.dwell(121_500_000, 2048)
+    wait_for_dwell(reader)
+    device.calls.clear()
+    reader.dwell(121_500_000, 2048)
+    wait_for_dwell(reader)
+    assert device.calls == []
+    reader.close()
+
+
+def test_stream_returns_to_continuous_blocks_on_that_channel():
+    device = HopDevice()
+    reader = tuned_reader(device)
+    reader.dwell(121_500_000, 2048)
+    wait_for_dwell(reader)
+    list(reader.blocks())
+    reader.stream(118_700_000)
+    assert wait_until(lambda: reader._q.qsize() > 1)
+    assert device.reads[-1] == (118_700_000 + TUNER_OFFSET_HZ, reader.block_samples)
+    reader.close()
+
+
+def test_a_hop_throws_away_blocks_from_the_old_channel():
+    device = HopDevice()
+    reader = tuned_reader(device)
+    assert wait_until(lambda: reader._q.qsize() > 1)
+    reader.dwell(121_500_000, 2048)
+    wait_for_dwell(reader)
+    assert reader._q.qsize() == 0
+    reader.close()
+
+
+def test_a_failed_hop_returns_nothing_and_the_next_one_tunes():
+    device = HopDevice()
+    reader = tuned_reader(device)
+    device.fail_tuning = True
+    reader.dwell(121_500_000, 2048)
+    block, hz = wait_for_dwell(reader)
+    assert block.size == 0 and hz == 121_500_000
+    assert reader.hop_failures == 1
+
+    device.fail_tuning = False
+    reader.dwell(121_500_000, 2048)
+    block, _ = wait_for_dwell(reader)
+    assert block.size == 2048
+    assert device.freq_hz == 121_500_000 + TUNER_OFFSET_HZ
+    reader.close()
+
+
+def test_a_failed_return_reads_nothing_until_it_lands():
+    """Blocks from the wrong channel must not reach the demodulator."""
+    device = HopDevice()
+    reader = tuned_reader(device)
+    reader.dwell(121_500_000, 2048)
+    wait_for_dwell(reader)
+    device.fail_tuning = True
+    reader.stream(118_700_000)
+    assert wait_until(lambda: reader.hop_failures >= 2)
+    device.reads.clear()
+    time.sleep(0.03)
+    assert device.reads == []
+    device.fail_tuning = False
+    assert wait_until(lambda: device.reads[-1:] == [(118_700_000 + TUNER_OFFSET_HZ,
+                                                    reader.block_samples)])
+    reader.close()
+
+
+def test_a_direct_retune_cancels_what_was_asked():
+    device = HopDevice()
+    reader = tuned_reader(device)
+    reader.dwell(121_500_000, 2048)
+    reader.set_frequency(119_000_000)
+    time.sleep(0.03)
+    assert device.freq_hz == 119_000_000 + TUNER_OFFSET_HZ
+    assert reader.take_dwell() is None
+    assert device.reads[-1] == (119_000_000 + TUNER_OFFSET_HZ, reader.block_samples)
+    reader.close()
+
+
+def test_close_works_while_waiting_between_dwells():
+    device = HopDevice()
+    reader = tuned_reader(device)
+    reader.dwell(121_500_000, 2048)
+    wait_for_dwell(reader)
+    reader.close()
+    assert device.closed and not reader.is_open
+
+
+def test_stats_count_hops():
+    device = HopDevice()
+    reader = tuned_reader(device)
+    for hz in (121_500_000, 118_700_000, 121_500_000):
+        reader.dwell(hz, 2048)
+        wait_for_dwell(reader)
+    stats = reader.stats
+    reader.close()
+    assert stats["hops"] == 3 and stats["dwells"] == 3 and stats["hop_failures"] == 0
+
+
 # -- the real binding, against the real shared library when there is one ------- #
 
 @pytest.mark.librtlsdr
@@ -225,6 +405,14 @@ def fake_lib(tmp_path, monkeypatch):
 def device_config(**over):
     return {"device_serial": "", "device_index": 0, "gain_mode": "manual", "gain_db": 32.8,
             "ppm": 0, "swap_iq": False, "tuner_profiles": {}, **over}
+
+
+def test_binding_resets_the_buffer_on_request(fake_lib):
+    device = RtlDevice(device_config())
+    before = len(fake_lib())
+    device.reset_buffer()
+    assert fake_lib()[before:] == [["reset", "0"]]
+    device.close()
 
 
 def test_binding_enumerates_serials(fake_lib):

@@ -29,13 +29,15 @@ from pathlib import Path
 import numpy as np
 
 from rbsdrradio.audio import AlsaSink, AudioError, volume_gain
+from rbsdrradio.controller import Controller, State
 from rbsdrradio.dsp import FS_HZ, AmDemod, FmDemod, pcm16, to_complex64
 from rbsdrradio.freqrules import SPACING_25, parse_channel
 from rbsdrradio.recorder import repair_wav, wav_header
 from rbsdrradio.sdr import RtlDevice, SdrError, SdrReader
 from rbsdrradio.squelch import Squelch, SquelchParams
 
-__all__ = ["BenchRequest", "Bench", "run_test", "EXIT_OK", "EXIT_NO_SIGNAL", "EXIT_HARDWARE"]
+__all__ = ["BenchRequest", "Bench", "run_test", "run_dual_test", "EXIT_OK", "EXIT_NO_SIGNAL",
+           "EXIT_HARDWARE"]
 
 log = logging.getLogger("rbsdrradio.bench")
 
@@ -49,6 +51,7 @@ _CLIP_LEVEL = 0.99
 _CLIP_WARN = 0.001
 _FM_BAND_MHZ = (87.5, 108.0)
 _SETTLE_S = 0.25
+_TICK_S = 0.1
 #: Neither this nor twice this is a multiple of the FM or airband channel spacing, so a
 #: station never lands where another one was.
 _SENSE_STEP_HZ = 170_000
@@ -99,7 +102,12 @@ class Bench:
                 out(f"  note: {problem}; tuning it as a plain frequency")
             else:
                 self.freq_hz, self.spacing = channel.freq_hz, channel.spacing
-            self.demod = AmDemod(self.spacing)
+            options = cfg.demod
+            self.demod = AmDemod(self.spacing, detector=options["detector"],
+                                 noise_reduction_db=options["noise_reduction_db"])
+            nr_db = options["noise_reduction_db"]
+            out(f"  detector    {options['detector']}, noise reduction "
+                + (f"{nr_db:g} dB" if nr_db > 0 else "off"))
         else:
             if not _FM_BAND_MHZ[0] <= request.mhz <= _FM_BAND_MHZ[1]:
                 out(f"  note: {request.mhz:g} MHz is outside the FM broadcast band")
@@ -262,6 +270,107 @@ def _measure_sense(reader: SdrReader, freq_hz: int) -> str:
     return sense_from_retune(at_channel, stepped)
 
 
+class _NoAudio:
+    """The controller's sound port with nothing behind it: a soak needs no player."""
+
+    is_open = False
+
+    def open(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+    def poll(self) -> None:
+        pass
+
+    def write(self, pcm: bytes) -> None:
+        pass
+
+
+class _NoRecorder:
+    active = False
+    fault = False
+
+    def feed(self, pcm: bytes, gate_open: bool, channel_khz: int) -> None:
+        pass
+
+    def end_segment(self) -> None:
+        pass
+
+
+class _CountLocks:
+    """The controller's publisher port, counting what would reach the bridge."""
+
+    def __init__(self):
+        self.heard = 0
+        self.locks: dict[int, int] = {}
+        self.last: dict[str, int] = {}
+
+    def publish(self, payload: dict[str, int]) -> None:
+        self.last = payload
+        heard = payload["sdrradiofreqheard"]
+        if heard and heard != self.heard:
+            self.locks[heard] = self.locks.get(heard, 0) + 1
+        self.heard = heard
+
+
+def run_dual_test(cfg, primary_mhz: float, secondary_mhz: float, seconds: float,
+                  squelch_db: int, opener=RtlDevice,
+                  out: Callable[[str], None] = print) -> int:
+    """Soak the real reader and the real controller on two channels. Returns the exit code.
+
+    librtlsdr prints `[R82XX] PLL not locked!` on stderr and reports success, so keep
+    stderr and count those lines: only the first, at start-up, means nothing.
+    """
+    out(f"  dual watch on {primary_mhz:.3f} and {secondary_mhz:.3f} MHz, {seconds:g} s, "
+        f"squelch {squelch_db} dB. Ctrl-C ends it early.")
+    locks = _CountLocks()
+    reader = SdrReader(cfg.sdr, opener)
+    controller = Controller(cfg, reader, _NoAudio(), _NoRecorder(), locks)
+    controller.apply({"freq": primary_mhz, "secondary": secondary_mhz, "squelch": squelch_db})
+    start = last_tick = time.monotonic()
+    watched_s = 0.0
+    try:
+        with contextlib.suppress(KeyboardInterrupt):
+            while (now := time.monotonic()) - start < seconds:
+                got = False
+                for block, gap in reader.blocks():
+                    controller.push(block, gap)
+                    got = True
+                dwell = reader.take_dwell()
+                if dwell is not None:
+                    controller.push_dwell(*dwell)
+                    got = True
+                if now - last_tick >= _TICK_S:
+                    if controller.watch is not None:
+                        watched_s += now - last_tick
+                    last_tick = now
+                    controller.tick()
+                    if controller.state is State.FAULT:
+                        out(f"  cannot use the SDR: {controller.reason}")
+                        return EXIT_HARDWARE
+                if not got:
+                    time.sleep(0.002)
+        stats = reader.stats
+    finally:
+        controller.shutdown()
+    hops = stats["hops"]
+    out(f"  hops {hops}, failed {stats['hop_failures']}, looks {stats['dwells']}, "
+        f"overruns {stats['overruns']}, read errors {stats['read_errors']}")
+    if hops:
+        out(f"  hop mean {1000.0 * stats['hop_s_total'] / hops:.1f} ms, "
+            f"worst {1000.0 * stats['hop_s_worst']:.1f} ms")
+    if stats["dwells"]:
+        out(f"  cycle {2000.0 * watched_s / stats['dwells']:.0f} ms, "
+            "primary to secondary and back, locks included")
+    for khz, count in sorted(locks.locks.items()):
+        out(f"  {khz / 1000:.3f}: locked {count} time(s)")
+    out(f"  last fault mask {locks.last.get('sdrradiofault', 0)}")
+    failed = stats["hop_failures"] or stats["overruns"] or stats["read_errors"]
+    return EXIT_NO_SIGNAL if failed or not hops else EXIT_OK
+
+
 def run_test(cfg, request: BenchRequest, opener=RtlDevice,
              out: Callable[[str], None] = print) -> int:
     """Run one antenna test. Returns the process exit code."""
@@ -274,7 +383,9 @@ def run_test(cfg, request: BenchRequest, opener=RtlDevice,
         return bench.report()
 
     sink = None
-    if request.audio and request.volume > 0:
+    if request.audio and request.volume > 0 and not cfg.audio["device"]:
+        out("  no audio: audio.device is empty in the config (--wav still records)")
+    elif request.audio and request.volume > 0:
         sink = AlsaSink(cfg.audio, AmDemod.audio_hz if request.mode == "am" else FmDemod.audio_hz)
     bench = Bench(request, cfg, sink, out)
     reader = SdrReader(cfg.sdr, opener)

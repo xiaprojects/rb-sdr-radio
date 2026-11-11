@@ -88,3 +88,60 @@ def test_overrides_do_not_touch_the_original(tmp_path):
     base = load(SHIPPED_PATH)
     changed = base.with_overrides(radio={"volume": 1})
     assert changed.radio["volume"] == 1 and base.radio["volume"] == 50
+
+
+def test_an_older_config_gets_the_dual_section_of_this_version(tmp_path):
+    """install.sh keeps /boot/firmware/rb/rb-sdr-radio.json across an upgrade, and an
+    invalid config stops the daemon: the upgrade must not silence the radio."""
+    path = write(tmp_path, lambda d: d.pop("dual"))
+    shipped = load(SHIPPED_PATH).dual
+    assert load(path).dual == shipped
+
+
+def test_an_older_config_gets_the_demod_section_of_this_version(tmp_path):
+    path = write(tmp_path, lambda d: (d.pop("demod"), d.pop("dual")))
+    loaded = load(path)
+    assert loaded.demod == {"detector": "envelope", "noise_reduction_db": 0}
+    assert loaded.dual == load(SHIPPED_PATH).dual
+
+
+def test_an_older_dual_section_gets_the_keys_added_since(tmp_path):
+    path = write(tmp_path, lambda d: (d["dual"].pop("uninterrupted_s"),
+                                      d["dual"].update(hold_s=3.0)))
+    loaded = load(path)
+    assert loaded.dual["uninterrupted_s"] == load(SHIPPED_PATH).dual["uninterrupted_s"]
+    assert loaded.dual["hold_s"] == 3.0
+
+
+def test_an_empty_audio_device_is_valid_and_shipped():
+    """A Raspberry Pi 5 has no sound card out of the box."""
+    assert load(SHIPPED_PATH).audio["device"] == ""
+
+
+def test_a_demod_section_is_read_not_replaced(tmp_path):
+    path = write(tmp_path, lambda d: d["demod"].update(detector="synchronous",
+                                                       noise_reduction_db=12))
+    assert load(path).demod == {"detector": "synchronous", "noise_reduction_db": 12}
+
+
+@pytest.mark.parametrize("change", [{"detector": "coherent"}, {"noise_reduction_db": -1},
+                                    {"noise_reduction_db": 21}, {"noise_reduction_db": "on"},
+                                    {"surprise": 1}])
+def test_a_bad_demod_section_is_refused(tmp_path, change):
+    path = write(tmp_path, lambda d: d["demod"].update(change))
+    with pytest.raises(ConfigError, match="demod"):
+        load(path)
+
+
+def test_a_dual_section_is_read_not_replaced(tmp_path):
+    path = write(tmp_path, lambda d: d["dual"].update(lookback_s=2.5))
+    assert load(path).dual["lookback_s"] == 2.5
+
+
+@pytest.mark.parametrize("change", [{"fill_samples": 16384}, {"dwell_samples": 8192},
+                                    {"hop_fail_limit": 0}, {"hold_s": 0},
+                                    {"surprise": 1}])
+def test_a_bad_dual_section_is_refused(tmp_path, change):
+    path = write(tmp_path, lambda d: d["dual"].update(change))
+    with pytest.raises(ConfigError, match="dual"):
+        load(path)

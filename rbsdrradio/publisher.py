@@ -1,4 +1,4 @@
-"""Status publishing: `POST /bridge/float`, RB-SDR-RADIO-IF v1.0.
+"""Status publishing: `POST /bridge/float`, RB-SDR-RADIO-IF v1.1.
 
 RB-01 decodes the body into `map[string]float32`, all or nothing: a single string,
 boolean or nested value and the whole POST is discarded with only a line in its
@@ -32,7 +32,8 @@ METERS = ("sdrradiosignal", "sdrradiosnr")
 
 #: Everything on the wire. The interface document is written from this; a test
 #: fails if the two disagree.
-FIELDS = ("sdrradiostatus", "sdrradiofault", "sdrradiofreqactive", "sdrradiovolumeactive",
+FIELDS = ("sdrradiostatus", "sdrradiofault", "sdrradiofreqactive",
+          "sdrradiosecondaryactive", "sdrradiofreqheard", "sdrradiovolumeactive",
           "sdrradiosquelchactive", "sdrradiorecordactive", "sdrradiosquelchopen", *METERS,
           "sdrradiosdr", "sdrradioaudio", "sdrradiorecording")
 

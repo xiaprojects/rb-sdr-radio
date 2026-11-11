@@ -5,6 +5,7 @@
     rb-sdr-radio self-test           the whole chain on synthetic signals
     rb-sdr-radio test-fm 101.5       antenna test on a broadcast FM station
     rb-sdr-radio test-am 118.7       antenna test on an airband channel
+    rb-sdr-radio test-dual 120 124.4 dual watch soak on two channels
 """
 
 from __future__ import annotations
@@ -25,6 +26,13 @@ from rbsdrradio import __version__
 from rbsdrradio.config import Config, ConfigError, load
 
 log = logging.getLogger("rbsdrradio")
+
+
+def _reduction_db(text: str) -> float:
+    value = float(text)
+    if not 0.0 <= value <= 20.0:
+        raise argparse.ArgumentTypeError("must be 0 to 20 dB")
+    return value
 
 
 def _test_parser(sub, name: str, helptext: str, common) -> argparse.ArgumentParser:
@@ -59,6 +67,19 @@ def _parser() -> argparse.ArgumentParser:
     t = _test_parser(sub, "test-am", "antenna test on an airband channel", common)
     t.add_argument("--squelch", type=int, default=0,
                    help="squelch in dB above the noise, 0 holds it open (default 0)")
+    t.add_argument("--detector", choices=["envelope", "synchronous"],
+                   help="AM detector (default: the config)")
+    t.add_argument("--noise-reduction", type=_reduction_db, metavar="DB",
+                   help="noise reduction 0-20 dB, 0 is off (default: the config)")
+    d = sub.add_parser("test-dual", help="dual watch soak on two channels", parents=[common])
+    d.add_argument("primary", type=float, help="primary channel in MHz")
+    d.add_argument("secondary", type=float, help="secondary channel in MHz")
+    d.add_argument("--seconds", type=float, default=60.0, help="length of the test (default 60)")
+    d.add_argument("--squelch", type=int, default=10,
+                   help="squelch in dB above the noise, above 0 (default 10)")
+    d.add_argument("--gain", help="tuner gain in dB, or 'auto' (default: the config)")
+    d.add_argument("--ppm", type=int, help="frequency correction (default: the config)")
+    d.add_argument("--device", help="dongle index or serial (default: the config)")
     return ap
 
 
@@ -83,7 +104,12 @@ def _bench_config(cfg: Config, args) -> Config:
             sdr |= {"device_index": int(args.device), "device_serial": ""}
         else:
             sdr["device_serial"] = args.device
-    return cfg.with_overrides(sdr=sdr)
+    demod: dict = {}
+    if getattr(args, "detector", None) is not None:
+        demod["detector"] = args.detector
+    if getattr(args, "noise_reduction", None) is not None:
+        demod["noise_reduction_db"] = args.noise_reduction
+    return cfg.with_overrides(sdr=sdr, demod=demod)
 
 
 def _devices() -> int:
@@ -115,6 +141,12 @@ def _run_test(cfg: Config, args) -> int:
     return run_test(_bench_config(cfg, args), request)
 
 
+def _run_dual_test(cfg: Config, args) -> int:
+    from rbsdrradio.bench import run_dual_test
+    return run_dual_test(_bench_config(cfg, args), args.primary, args.secondary, args.seconds,
+                         args.squelch)
+
+
 def main(argv=None) -> int:
     args = _parser().parse_args(argv)
 
@@ -135,6 +167,8 @@ def main(argv=None) -> int:
 
     if args.command in ("test-am", "test-fm"):
         return _run_test(cfg, args)
+    if args.command == "test-dual":
+        return _run_dual_test(cfg, args)
 
     from rbsdrradio import daemon
     with contextlib.suppress(KeyboardInterrupt):

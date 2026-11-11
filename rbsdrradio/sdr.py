@@ -27,11 +27,19 @@ import numpy as np
 
 from rbsdrradio.dsp import FS_HZ, TUNER_OFFSET_HZ, to_complex64
 
-__all__ = ["SdrError", "DeviceChoice", "DeviceInfo", "RtlDevice", "FakeDevice", "SdrReader",
-           "resolve_device", "list_devices", "probe_tuner", "snap_gain", "apply_tuner_profile",
-           "TUNER_NAMES", "NO_AGC_TUNERS", "TUNER_PROFILE_KEYS"]
+__all__ = ["SdrError", "EMPTY_BLOCK", "DeviceChoice", "DeviceInfo", "RtlDevice", "FakeDevice",
+           "SdrReader", "resolve_device", "list_devices", "probe_tuner", "snap_gain",
+           "apply_tuner_profile", "TUNER_NAMES", "NO_AGC_TUNERS", "TUNER_PROFILE_KEYS"]
 
 log = logging.getLogger("rbsdrradio.sdr")
+
+
+#: What a dwell returns when the hop did not land.
+EMPTY_BLOCK = np.empty(0, dtype=np.complex64)
+
+#: How long the reader waits for the controller's next request between dwells, and
+#: between attempts to get back to a channel. Only bounds how soon it notices a stop.
+_REQUEST_WAIT_S = 0.05
 
 
 class SdrError(RuntimeError):
@@ -287,6 +295,10 @@ class RtlDevice:
     def set_frequency(self, hz: int) -> None:
         self._check("tune", self._lib.rtlsdr_set_center_freq(self._dev, int(hz)))
 
+    def reset_buffer(self) -> None:
+        """Throw away what was sampled before a hop: about 2 ms of the old channel."""
+        self._check("reset buffer", self._lib.rtlsdr_reset_buffer(self._dev))
+
     def read(self, n: int) -> np.ndarray:
         raw = np.empty(n * 2, dtype=np.uint8)
         got = ctypes.c_int(0)
@@ -316,6 +328,9 @@ class FakeDevice:
     def set_frequency(self, hz: int) -> None:
         self.freq_hz = int(hz)
 
+    def reset_buffer(self) -> None:
+        pass
+
     def read(self, n: int) -> np.ndarray:
         return self.source(n)
 
@@ -323,11 +338,25 @@ class FakeDevice:
         self.closed = True
 
 
+@dataclass(frozen=True)
+class _Request:
+    """The reader's next move. 0 samples is back to continuous blocks."""
+
+    hz: int
+    samples: int
+    epoch: int
+
+
 class SdrReader:
     """Threaded reader: the controller's SDR port.
 
     `set_frequency()` takes the wanted frequency; the tuner offset is applied here,
     so nothing else has to remember it. `opener` is injectable for tests.
+
+    Dual watch asks for `dwell()` and `stream()` instead. A hop blocks for 29 ms, about
+    20 times a second, so it happens here, between reads, and never on the event loop.
+    The slot holds one request and the newest wins. Until something asks for a dwell the
+    thread only ever takes the path it has always taken.
     """
 
     def __init__(self, cfg_sdr: dict, opener: Callable[[dict], object] = RtlDevice,
@@ -347,6 +376,22 @@ class SdrReader:
         self.overruns = 0
         self.blocks_read = 0
         self.read_errors = 0
+        self._request: _Request | None = None
+        self._request_lock = threading.Lock()
+        self._requested = threading.Event()
+        self._tuner_lock = threading.Lock()
+        self._epoch = 0
+        self._dwelling = False
+        self._dwell_block: tuple[np.ndarray, int] | None = None
+        self.hops = 0
+        self.hop_failures = 0
+        self.hop_s_total = 0.0
+        self.hop_s_worst = 0.0
+        self.dwells = 0
+
+    @property
+    def tuner(self) -> str:
+        return getattr(self.device, "tuner", "")
 
     @property
     def is_open(self) -> bool:
@@ -360,10 +405,12 @@ class SdrReader:
 
     def set_frequency(self, hz: int) -> None:
         """Retune, then discard what is in flight: it was sampled on the old channel."""
+        self._cancel_requests()
         self.freq_hz = int(hz)
         try:
             self.open()
-            self.device.set_frequency(self.freq_hz + TUNER_OFFSET_HZ)
+            with self._tuner_lock:
+                self.device.set_frequency(self.freq_hz + TUNER_OFFSET_HZ)
         except SdrError:
             raise
         except Exception as e:                       # noqa: BLE001
@@ -373,6 +420,32 @@ class SdrReader:
         self.last_block_at = self.clock()
         self._start()
 
+    def dwell(self, hz: int, samples: int) -> None:
+        """Hop to `hz` unless already there and take one look, for `take_dwell`."""
+        self._ask(int(hz), samples)
+
+    def stream(self, hz: int) -> None:
+        """Hop to `hz` unless already there and go back to continuous blocks."""
+        self._ask(int(hz), 0)
+
+    def take_dwell(self) -> tuple[np.ndarray, int] | None:
+        """`(samples, hz)` of the last look, once. Empty samples: the hop did not land."""
+        with self._request_lock:
+            result, self._dwell_block = self._dwell_block, None
+        return result
+
+    def _ask(self, hz: int, samples: int) -> None:
+        with self._request_lock:
+            self._request = _Request(hz, samples, self._epoch)
+        self._requested.set()
+
+    def _cancel_requests(self) -> None:
+        """Whatever was asked no longer applies: the tuner is about to be set directly."""
+        with self._request_lock:
+            self._epoch += 1
+            self._request, self._dwell_block = None, None
+            self._dwelling = False
+
     def _start(self) -> None:
         if self._thread is None:
             self._stop.clear()
@@ -381,7 +454,9 @@ class SdrReader:
 
     def close(self) -> None:
         """Release the dongle. Safe to call when already released."""
+        self._cancel_requests()
         self._stop.set()
+        self._requested.set()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             if self._thread.is_alive():
@@ -417,9 +492,74 @@ class SdrReader:
             except queue.Empty:
                 return
 
+    def _hop(self, request: _Request) -> bool:
+        """Tune for a request. Stale, or failed, is not landed."""
+        with self._tuner_lock:
+            if request.epoch != self._epoch:
+                return False
+            if request.hz == self.freq_hz:
+                return True
+            started = self.clock()
+            try:
+                self.device.set_frequency(request.hz + TUNER_OFFSET_HZ)
+                self.device.reset_buffer()
+            except Exception as e:                   # noqa: BLE001
+                self.hop_failures += 1
+                self.freq_hz = None                  # unknown, so the next hop must tune
+                if self.hop_failures in (1, 10, 100):
+                    log.warning("SDR hop failed (%s)", e)
+                return False
+            self.freq_hz = request.hz
+        spent = self.clock() - started
+        self.hops += 1
+        self.hop_s_total += spent
+        self.hop_s_worst = max(self.hop_s_worst, spent)
+        self._drain()
+        self._gap = True
+        return True
+
+    def _read_dwell(self, samples: int) -> np.ndarray:
+        try:
+            block = self.device.read(samples)
+        except Exception as e:                       # noqa: BLE001
+            self.read_errors += 1
+            if self.read_errors in (1, 10, 100):
+                log.warning("SDR read failed (%s)", e)
+            return EMPTY_BLOCK
+        self.dwells += 1
+        self.last_block_at = self.clock()
+        return np.conj(block) if self.swap_iq else block
+
+    def _serve_request(self) -> None:
+        """One step of dual watch, between reads, so a hop and a read never overlap."""
+        with self._request_lock:
+            request, self._request = self._request, None
+            self._requested.clear()
+            if request is not None and request.epoch == self._epoch:
+                self._dwelling = request.samples > 0
+        if request is None:
+            self._requested.wait(_REQUEST_WAIT_S)
+            return
+        landed = self._hop(request)
+        if request.samples:
+            block = self._read_dwell(request.samples) if landed else EMPTY_BLOCK
+            with self._request_lock:
+                if request.epoch == self._epoch:
+                    self._dwell_block = (block, request.hz)
+        elif not landed and request.epoch == self._epoch:
+            # Blocks from the wrong channel must not reach the demodulator. Nothing is
+            # read until it lands, and if it never does the stall watchdog takes over.
+            with self._request_lock:
+                if self._request is None:
+                    self._request = request
+            self._stop.wait(_REQUEST_WAIT_S)
+
     def _run(self) -> None:
         backoff = 0.0
         while not self._stop.is_set():
+            if self._request is not None or self._dwelling:
+                self._serve_request()
+                continue
             try:
                 block = self.device.read(self.block_samples)
                 backoff = 0.0
@@ -451,4 +591,6 @@ class SdrReader:
     @property
     def stats(self) -> dict:
         return {"blocks_read": self.blocks_read, "overruns": self.overruns,
-                "read_errors": self.read_errors, "queued": self._q.qsize()}
+                "read_errors": self.read_errors, "queued": self._q.qsize(),
+                "hops": self.hops, "hop_failures": self.hop_failures, "dwells": self.dwells,
+                "hop_s_total": self.hop_s_total, "hop_s_worst": self.hop_s_worst}

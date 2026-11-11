@@ -6,12 +6,12 @@
 #     sudo ./install.sh --no-service     files only, no systemd
 #     sudo ./install.sh --uninstall      remove everything except config and recordings
 #
-# Installs to /opt/rb-sdr-radio, config to /etc/rb-sdr-radio. Never needs root at
+# Installs to /opt/addons/rb-sdr-radio, config to /boot/firmware/rb. Never needs root at
 # runtime. The service is enabled but not started: pin the dongle first.
 set -euo pipefail
 
-PREFIX=/opt/rb-sdr-radio
-CONFDIR=/etc/rb-sdr-radio
+PREFIX=/opt/addons/rb-sdr-radio
+CONFDIR=/boot/firmware/rb
 UNIT=rb-sdr-radio.service
 PLAYBACK=/opt/stratux/www/playback
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,9 +39,9 @@ die()  { printf '\033[31m    error: %s\033[0m\n' "$*" >&2; exit 1; }
 if [ "$UNINSTALL" = 1 ]; then
   say "Uninstalling"
   systemctl disable --now "$UNIT" 2>/dev/null || true
-  rm -f "/etc/systemd/system/$UNIT" /etc/udev/rules.d/99-rb-sdr-radio.rules \
+  rm -f "/lib/systemd/system/$UNIT" /etc/udev/rules.d/99-rb-sdr-radio.rules \
         /etc/modprobe.d/rb-sdr-radio-blacklist.conf
-  rm -rf "$PREFIX" "/etc/systemd/system/$UNIT.d"
+  rm -rf "$PREFIX" "/lib/systemd/system/$UNIT.d"
   systemctl daemon-reload
   udevadm control --reload-rules || true
   echo "    kept: $CONFDIR and the recordings in $PLAYBACK"
@@ -140,11 +140,11 @@ fi
 # --------------------------------------------------------------------------- #
 if [ "$DO_SERVICE" = 1 ]; then
   say "Installing the systemd unit"
-  install -m 0644 "$SRC/systemd/$UNIT" /etc/systemd/system/
+  install -m 0644 "$SRC/systemd/$UNIT" /lib/systemd/system/
   if [ "$RUN_USER" != pi ]; then
-    install -d "/etc/systemd/system/$UNIT.d"
+    install -d "/lib/systemd/system/$UNIT.d"
     printf '[Service]\nUser=%s\nEnvironment=XDG_RUNTIME_DIR=/run/user/%s\n' \
-      "$RUN_USER" "$(id -u "$RUN_USER")" > "/etc/systemd/system/$UNIT.d/user.conf"
+      "$RUN_USER" "$(id -u "$RUN_USER")" > "/lib/systemd/system/$UNIT.d/user.conf"
   fi
   systemctl daemon-reload
   systemctl enable "$UNIT"

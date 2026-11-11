@@ -39,6 +39,10 @@ class AudioError(RuntimeError):
     """The player could not be started or has died."""
 
 
+def _worth_logging(count: int) -> bool:
+    return count in (1, 10, 100) or count % 1000 == 0
+
+
 def volume_gain(volume: int) -> float:
     """0-100 to a sample gain. Squared, because loudness is not linear in amplitude."""
     return (max(0, min(100, volume)) / 100.0) ** 2
@@ -53,6 +57,7 @@ class AlsaSink:
         self._proc: subprocess.Popen | None = None
         self._fd: int | None = None
         self.dropped = 0
+        self.underruns = 0
         self.last_error = ""
 
     @property
@@ -88,9 +93,16 @@ class AlsaSink:
         with contextlib.suppress(ValueError, OSError):
             for line in proc.stderr:
                 text = line.decode("utf-8", "replace").strip()
-                if text:
-                    self.last_error = text
-                    log.debug("aplay: %s", text)
+                if not text:
+                    continue
+                if "underrun" in text:
+                    # The card played faster than blocks came: a gap, heard as a pop.
+                    self.underruns += 1
+                    if _worth_logging(self.underruns):
+                        log.warning("audio underrun #%d: %s", self.underruns, text)
+                    continue
+                self.last_error = text
+                log.debug("aplay: %s", text)
 
     def write(self, pcm: bytes) -> None:
         """Hand one block to the player. Never blocks. Raises `AudioError` if it died."""
@@ -99,7 +111,10 @@ class AlsaSink:
         try:
             os.write(self._fd, pcm)
         except BlockingIOError:
+            # The card plays slower than the dongle samples: a block lost, heard as a pop.
             self.dropped += 1
+            if _worth_logging(self.dropped):
+                log.warning("audio block dropped #%d: the sound card is behind", self.dropped)
         except OSError as e:
             detail = self.last_error or str(e)
             self.close()

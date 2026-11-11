@@ -31,8 +31,9 @@ __all__ = ["ParsedFrame", "parse_frame", "BridgeClient", "enable_tcp_keepalive",
 log = logging.getLogger("rbsdrradio.bridge")
 
 #: Bridge key -> name handed to `on_values`.
-CONSUMED = {"sdrradiofreq": "freq", "sdrradiovolume": "volume",
-            "sdrradiosquelch": "squelch", "sdrradiorecord": "record"}
+CONSUMED = {"sdrradiofreq": "freq", "sdrradiofreqsecondary": "secondary",
+            "sdrradiovolume": "volume", "sdrradiosquelch": "squelch",
+            "sdrradiorecord": "record"}
 
 CLOSE_TIMEOUT_S = 0.5
 KEEPALIVE_IDLE_S = 10

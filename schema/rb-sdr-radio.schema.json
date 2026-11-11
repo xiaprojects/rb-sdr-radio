@@ -3,7 +3,7 @@
   "title": "RB-SDR-Radio configuration",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "bridge", "publish", "sdr", "radio", "squelch", "audio", "record", "log"],
+  "required": ["version", "bridge", "publish", "sdr", "radio", "dual", "squelch", "demod", "audio", "record", "log"],
   "properties": {
     "$schema": { "type": "string" },
     "version": { "const": "1.0" },
@@ -72,6 +72,19 @@
         "debounce_ms": { "type": "integer", "minimum": 0 }
       }
     },
+    "dual": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hold_s", "lookback_s", "uninterrupted_s", "dwell_samples", "fill_samples", "hop_fail_limit"],
+      "properties": {
+        "hold_s": { "type": "number", "exclusiveMinimum": 0 },
+        "lookback_s": { "type": "number", "exclusiveMinimum": 0 },
+        "uninterrupted_s": { "type": "number", "exclusiveMinimum": 0 },
+        "dwell_samples": { "type": "integer", "minimum": 16384, "multipleOf": 1024 },
+        "fill_samples": { "type": "integer", "minimum": 0, "multipleOf": 8 },
+        "hop_fail_limit": { "type": "integer", "minimum": 1 }
+      }
+    },
     "squelch": {
       "type": "object",
       "additionalProperties": false,
@@ -82,12 +95,21 @@
         "hang_s": { "type": "number", "minimum": 0 }
       }
     },
+    "demod": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["detector", "noise_reduction_db"],
+      "properties": {
+        "detector": { "enum": ["envelope", "synchronous"] },
+        "noise_reduction_db": { "type": "number", "minimum": 0, "maximum": 20 }
+      }
+    },
     "audio": {
       "type": "object",
       "additionalProperties": false,
       "required": ["device", "player", "buffer_ms", "retry_s"],
       "properties": {
-        "device": { "type": "string", "minLength": 1 },
+        "device": { "type": "string", "description": "ALSA device for aplay -D. Empty: no audio output, recording carries on" },
         "player": { "type": "string", "minLength": 1 },
         "buffer_ms": { "type": "integer", "minimum": 20 },
         "retry_s": { "type": "number", "exclusiveMinimum": 0 }

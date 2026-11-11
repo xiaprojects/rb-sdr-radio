@@ -1,4 +1,4 @@
-"""VHF COM channel rules: ICAO 25 kHz and 8.33 kHz channel names.
+"""VHF channel rules: the COM band's ICAO 25 and 8.33 kHz names, and the VOR band.
 
 What a pilot dials is a channel *name*, not a frequency. On the 8.33 kHz plan
 (ICAO Annex 10 Vol V, table 4-1 bis) the two differ, and the name also carries
@@ -19,6 +19,11 @@ Treating `118.030` as 118.030 MHz would put the receiver 5 kHz off the carrier,
 which is outside the 8.33 kHz filter. Names ending 20, 45, 70 and 95 are not
 channels at all.
 
+Below 118 MHz is the navaid band, listened to for a station's ident and voice: a name
+is the frequency, on a 50 kHz grid, with the 25 kHz filter. rb-vor refuses an ILS
+localiser because it cannot give a bearing from one. Here it is only audio, so they
+all pass.
+
 All arithmetic is in integer kHz and Hz: bridge values arrive as float32, so a
 frequency must never be compared as a float (rb-vor, freqrules).
 """
@@ -29,9 +34,13 @@ import math
 from dataclasses import dataclass
 
 __all__ = ["Channel", "parse_channel", "channel_from_name", "all_channels",
-           "BAND_MIN_KHZ", "BAND_MAX_KHZ", "SPACING_25", "SPACING_833"]
+           "BAND_MIN_KHZ", "BAND_MAX_KHZ", "COM_MIN_KHZ", "NAV_MAX_KHZ",
+           "SPACING_25", "SPACING_833"]
 
-BAND_MIN_KHZ = 118_000
+BAND_MIN_KHZ = 108_000
+NAV_MAX_KHZ = 117_950
+COM_MIN_KHZ = 118_000
+_NAV_GRID_KHZ = 50
 #: 136.990 tunes 136.99167 MHz, the last channel below the 137 MHz band edge.
 BAND_MAX_KHZ = 136_990
 
@@ -63,11 +72,19 @@ class Channel:
     def label(self) -> str:
         return f"{self.name_khz / 1000:.3f}"
 
+    @property
+    def nav(self) -> bool:
+        return self.name_khz < COM_MIN_KHZ
+
 
 def channel_from_name(name_khz: int) -> Channel | None:
     """The channel with this name in kHz, or None if the name does not exist."""
     if not BAND_MIN_KHZ <= name_khz <= BAND_MAX_KHZ:
         return None
+    if name_khz < COM_MIN_KHZ:
+        if name_khz > NAV_MAX_KHZ or name_khz % _NAV_GRID_KHZ:
+            return None
+        return Channel(name_khz, name_khz * 1000, SPACING_25)
     entry = _DIGITS.get(name_khz % 100)
     if entry is None:
         return None
@@ -83,10 +100,11 @@ def parse_channel(mhz: float) -> tuple[Channel | None, str]:
     khz = mhz * 1000.0
     name = round(khz)
     if not BAND_MIN_KHZ <= name <= BAND_MAX_KHZ:
-        return None, f"{mhz:.3f} MHz is outside the COM band 118.000-136.990"
+        return None, f"{mhz:.3f} MHz is outside the band 108.000-136.990"
     channel = channel_from_name(name) if abs(khz - name) <= _NAME_TOLERANCE_KHZ else None
     if channel is None:
-        return None, f"{mhz:.4f} is not a 25 or 8.33 kHz channel name"
+        plan = "50 kHz navaid" if name < COM_MIN_KHZ else "25 or 8.33 kHz"
+        return None, f"{mhz:.4f} is not a {plan} channel name"
     return channel, ""
 
 

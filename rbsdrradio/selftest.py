@@ -49,6 +49,29 @@ def _check_am() -> tuple[bool, str]:
     return snr > 25.0, f"1 kHz tone recovered at {snr:.0f} dB"
 
 
+def _check_synchronous() -> tuple[bool, str]:
+    demod = AmDemod(SPACING_25, detector="synchronous")
+    iq = synth.am(1.0, -20.0, offset_hz=2000.0) + synth.noise(1.0, _NOISE_DBFS)
+    audio = np.concatenate([r.audio for r in [demod.process(b) for b in _blocks(iq)][4:]])
+    snr = _tone_snr_db(audio, AM_AUDIO_HZ, 1000.0)
+    return snr > 25.0, f"tone 2 kHz off the channel recovered at {snr:.0f} dB"
+
+
+def _check_noise_reduction() -> tuple[bool, str]:
+    """A bare carrier 8 dB over the noise: all that is heard is hiss."""
+    noise_dbfs = -30.0
+    iq = synth.carrier(1.0, synth.channel_noise_dbfs(noise_dbfs, 15_600.0) + 8.0)
+    iq = iq + synth.noise(1.0, noise_dbfs)
+
+    def hiss(demod: AmDemod) -> float:
+        audio = np.concatenate([r.audio for r in [demod.process(b) for b in _blocks(iq)][6:]])
+        return float(np.mean(np.square(audio, dtype=np.float64)))
+
+    down = 10.0 * np.log10(hiss(AmDemod(SPACING_25)) / hiss(AmDemod(SPACING_25,
+                                                                 noise_reduction_db=12)))
+    return down > 8.0, f"hiss on a weak carrier {down:.0f} dB lower at the 12 dB setting"
+
+
 def _check_squelch() -> tuple[bool, str]:
     params = SquelchParams(hysteresis_db=3.0, open_blocks=2, hang_s=0.1)
     demod = AmDemod(SPACING_25)
@@ -109,9 +132,23 @@ def _note_librtlsdr() -> str:
         return str(e)
 
 
+def _note_audio() -> str:
+    try:
+        device = load().audio["device"]
+    except Exception:                                # noqa: BLE001  -- reported above
+        device = None
+    if device == "":
+        return "off: audio.device is empty, recording only"
+    player = shutil.which("aplay")
+    if player is None:
+        return "aplay not found: sudo apt install alsa-utils"
+    return f"{player} on {device}" if device else player
+
+
 def run_self_test(out: Callable[[str], None] = print) -> int:
     checks = (("configuration", _check_config), ("channel plan", _check_channels),
-              ("AM demodulator", _check_am), ("squelch", _check_squelch),
+              ("AM demodulator", _check_am), ("synchronous AM", _check_synchronous),
+              ("noise reduction", _check_noise_reduction), ("squelch", _check_squelch),
               ("adjacent channel", _check_adjacent), ("FM demodulator", _check_fm),
               ("recorder", _check_recorder))
     failed = 0
@@ -124,7 +161,6 @@ def run_self_test(out: Callable[[str], None] = print) -> int:
         out(f"  {'ok  ' if ok else 'FAIL'}  {name:18s} {detail}")
     # Environment, not software: reported, never failed, so this works on a CI box.
     out(f"  note  {'SDR':18s} {_note_librtlsdr()}")
-    player = shutil.which("aplay")
-    out(f"  note  {'audio':18s} {player or 'aplay not found: sudo apt install alsa-utils'}")
+    out(f"  note  {'audio':18s} {_note_audio()}")
     out("  self-test " + ("PASSED" if not failed else f"FAILED ({failed})"))
     return 1 if failed else 0

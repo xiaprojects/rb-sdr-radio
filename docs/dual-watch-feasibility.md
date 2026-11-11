@@ -1,6 +1,9 @@
 # Dual watch on one RTL-SDR: feasibility
 
-**Status:** study only, nothing is implemented. Measured on 2026-11-05 on one R820T (Nooelec
+**Status:** implemented on 2026-11-06 as this study describes, see `rbsdrradio/dualwatch.py`
+and [the interface](RB-SDR-RADIO-IF-v1.1.md), section 2.2. Section 8 is still open except where
+it says otherwise, and section 9 is what was done. The measurements here are from before the
+daemon existed: on the same dongle the daemon's full cycle is about 118 ms. Measured on 2026-11-05 on one R820T (Nooelec
 NESDR Nano 3), indoors, on an x86 PC. No FC0012 was available, so its figures come from the
 librtlsdr 2.0.2 source and are labelled as estimates.
 
@@ -105,8 +108,11 @@ The rules:
 
 - **The primary always wins.** It is never left while locked, and the secondary is not
   checked until it has been quiet for `hold_s`.
-- **Look back from the secondary every `lookback_s`,** during the hold as well. Each look
-  costs 81 ms of secondary audio: two hops and one dwell.
+- **Look back from the secondary every `lookback_s`,** during the hold. Each look costs
+  81 ms of secondary audio, two hops and one dwell, and is heard as a pop. Amended
+  2026-11-10 after flight tests: a transmission on the secondary is not interrupted
+  unless it outlasts `dual.uninterrupted_s` (30 s), so an ATIS still cannot shut the
+  primary out, but it holds it out for those first 30 s.
 - **Hold after a transmission,** because the reply usually follows on the same channel.
 - **Confirm before locking.** One reading is not enough, for the reason `Squelch` already
   counts two: ignition noise is impulsive and a carrier is not. It adds 16 ms, only when a
@@ -364,7 +370,10 @@ is all it takes, about 10 minutes.
 
 ## 9. What it would change
 
-Not started. This is the size of the work, to be planned separately.
+Done on 2026-11-06, with these differences from the plan below. A dwell is one read of 16 ms
+rather than blocks of 8 ms, as that ends on time just the same. The interface gained
+`sdrradiosecondaryactive` and `sdrradiofreqheard` and two fault bits, and the status keys
+stay as planned.
 
 | Where | Change |
 |---|---|

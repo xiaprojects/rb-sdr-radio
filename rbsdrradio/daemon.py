@@ -73,6 +73,10 @@ async def run(cfg, opener=RtlDevice, stop: asyncio.Event | None = None) -> None:
                 for block, gap in reader.blocks():
                     controller.push(block, gap)
                     got = True
+                dwell = reader.take_dwell()
+                if dwell is not None:
+                    controller.push_dwell(*dwell)
+                    got = True
                 await asyncio.sleep(0.0 if got else (0.005 if reader.is_open else 0.05))
 
         # A task that dies takes the daemon down with it: under systemd that is a

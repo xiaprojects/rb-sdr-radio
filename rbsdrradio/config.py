@@ -20,7 +20,12 @@ __all__ = ["Config", "ConfigError", "load", "DEFAULT_PATHS", "SCHEMA_PATH", "SHI
 _ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = _ROOT / "schema" / "rb-sdr-radio.schema.json"
 SHIPPED_PATH = _ROOT / "config" / "rb-sdr-radio.json"
-DEFAULT_PATHS = (Path("/etc/rb-sdr-radio/rb-sdr-radio.json"), SHIPPED_PATH)
+DEFAULT_PATHS = (Path("/boot/firmware/rb/rb-sdr-radio.json"), SHIPPED_PATH)
+#: Sections added since the first release. install.sh keeps an existing config, so an
+#: upgrade meets one without them, and an invalid config would silence the radio.
+_ADDED_SECTIONS = ("dual", "demod")
+#: Keys added to existing sections since, filled in for the same reason.
+_ADDED_KEYS = {"dual": ("uninterrupted_s",)}
 
 
 class ConfigError(ValueError):
@@ -67,6 +72,9 @@ def _validate(data: dict) -> None:
     if record["max_segment_s"] * 2 * 16_000 > record["max_total_mb"] * 1_000_000:
         raise ConfigError("config['record']['max_segment_s']: one segment would exceed "
                           "max_total_mb")
+    dual = data["dual"]
+    if dual["fill_samples"] >= dual["dwell_samples"]:
+        raise ConfigError("config['dual']['fill_samples']: must be below dwell_samples")
 
 
 def load(path: str | Path | None = None) -> Config:
@@ -86,5 +94,13 @@ def load(path: str | Path | None = None) -> Config:
         raise ConfigError(f"{p}: invalid JSON at line {e.lineno}: {e.msg}") from e
     if not isinstance(data, dict):
         raise ConfigError(f"{p}: top level must be an object")
+    missing = [section for section in _ADDED_SECTIONS if section not in data]
+    keys = [(section, key) for section, names in _ADDED_KEYS.items() for key in names
+            if isinstance(data.get(section), dict) and key not in data[section]]
+    if missing or keys:
+        shipped = json.loads(SHIPPED_PATH.read_text())
+        data.update({section: shipped[section] for section in missing})
+        for section, key in keys:
+            data[section][key] = shipped[section][key]
     _validate(data)
     return Config(data, p)

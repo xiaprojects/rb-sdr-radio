@@ -1,6 +1,6 @@
-# RB-SDR-RADIO-IF v1.0: interface specification
+# RB-SDR-RADIO-IF v1.1: interface specification
 
-**Status:** v1.0, implemented by `rb-sdr-radio` 0.1.0
+**Status:** v1.1, implemented by `rb-sdr-radio` 0.2.0
 **For:** whoever builds the radio screen in RB-01. Nothing else is needed to write a
 consumer.
 
@@ -40,7 +40,8 @@ nothing.
 
 | Key | Unit | Range | Meaning |
 |---|---|---|---|
-| `sdrradiofreq` | MHz | 118.000 to 136.990, or 0 | Channel name to receive. **0 is off: the SDR is released.** |
+| `sdrradiofreq` | MHz | 108.000 to 136.990, or 0 | Channel name to receive, the primary with dual watch. **0 is off: the SDR is released.** |
+| `sdrradiofreqsecondary` | MHz | 108.000 to 136.990, or 0 | Channel to watch as well. **0 is one channel.** See 2.2. |
 | `sdrradiovolume` | | 0 to 100 | Audio output. **0 releases the ALSA device**; reception and recording carry on. |
 | `sdrradiosquelch` | dB | 0 to 100 | Opens when `sdrradiosnr` reaches this value. 0 holds it open, the "squelch test" position. |
 | `sdrradiorecord` | | 0 or 1 | Save received audio to the recording folder. |
@@ -63,36 +64,68 @@ differ, and the name also selects the narrower receive filter.
 | `118.030` | 118.0250 MHz | 8.33 kHz |
 
 Valid last two digits: 00 05 10 15 25 30 35 40 50 55 60 65 75 80 85 90. **Names ending
-20, 45, 70 and 95 do not exist**, so a 5 kHz spinner must skip them. Anything else
-(a true frequency such as 118.0083, or 137.000, the band edge) is rejected: the SDR is
-released and `sdrradiofault` bit 1 is set until a valid value arrives.
+20, 45, 70 and 95 do not exist**, so a 5 kHz spinner must skip them.
+
+Below 118 MHz is the navaid band, 108.000 to 117.950 on a **50 kHz grid**, for a station's
+ident and voice. The name is the frequency, the filter is the 25 kHz one, and localiser
+channels are accepted. A navaid's carrier never stops, so it is not recorded.
+
+Anything else (a true frequency such as 118.0083, 117.975, or 137.000, the band edge) is
+rejected: the SDR is released and `sdrradiofault` bit 0 is set until a valid value arrives.
 
 Changes are debounced by 300 ms, so a tuning knob retunes once when it stops. Expect
 `sdrradiofreqactive` to follow about 0.5 s after the last change.
+
+### 2.2 Dual watch
+
+With `sdrradiofreqsecondary` set the radio takes turns on the two channels, silent until
+one carries a signal, then locked on it. It is watching, not receiving both: one tuner
+hears one place at a time, so the start of a transmission is clipped by 30 to 125 ms.
+[dual-watch-feasibility.md](dual-watch-feasibility.md) has the measurements.
+
+- **The primary always wins.** It is never left while locked. From the secondary the radio
+  looks back at it every second once the transmission there ends, which costs 81 ms of
+  secondary audio. A transmission on the secondary is never interrupted, unless it lasts
+  more than 30 s (an ATIS): from then on it is looked past every second.
+- After a transmission the lock holds for 2 s, for the reply.
+- The secondary is a courtesy, not a watch: with a busy primary it is heard only part of
+  the time.
+
+It stays on the primary alone, with `sdrradiosecondaryactive` 0, while any of these holds:
+
+- `sdrradiofreqsecondary` is 0, not a channel (fault bit 4), or the primary's frequency.
+- `sdrradiosquelch` is 0. Held open, every look would find a signal.
+- The tuner failed to hop (fault bit 5). It tries again every 5 s.
+
+A rejected secondary never releases the SDR, unlike a rejected `sdrradiofreq`.
 
 ---
 
 ## 3. Status
 
-The daemon publishes all twelve keys together. All are integers.
+The daemon publishes all fourteen keys together. All are integers.
 
 | Key | Unit | Meaning |
 |---|---|---|
 | `sdrradiostatus` | code | What the radio is doing, see 3.1. The field to drive a status light. |
 | `sdrradiofault` | bits | What is wrong, see 3.2. 0 is healthy. |
-| `sdrradiofreqactive` | kHz | Channel in use, as a name: 118030 is 118.030. 0 when none. |
+| `sdrradiofreqactive` | kHz | Channel in use, as a name: 118030 is 118.030. 0 when none. With dual watch, the primary. |
+| `sdrradiosecondaryactive` | kHz | Channel being watched as well. 0 when the radio is not taking turns, see 2.2. |
+| `sdrradiofreqheard` | kHz | Channel whose audio is playing now. 0 with the squelch shut, and while taking turns. |
 | `sdrradiovolumeactive` | | Volume in force, after clamping. |
 | `sdrradiosquelchactive` | dB | Squelch in force, after clamping. |
 | `sdrradiorecordactive` | 0/1 | Recording enabled. |
 | `sdrradiosquelchopen` | 0/1 | Channel activity: the squelch is open. |
 | `sdrradiosignal` | dBFS | Channel level, negative. 0 means nothing measured. |
-| `sdrradiosnr` | dB | Channel level above the noise floor. 0 on an empty channel. |
+| `sdrradiosnr` | dB | Carrier level above the channel's noise floor. 0 on an empty channel, whatever the noise. |
 | `sdrradiosdr` | 0/1 | The dongle is held. |
 | `sdrradioaudio` | 0/1 | The ALSA device is held. |
 | `sdrradiorecording` | 0/1 | A file is being written now. |
 
 `sdrradiofreq` is in MHz and `sdrradiofreqactive` in kHz, the same as `vorfreq` and
 `vorfreqactive`. Divide by 1000 to display it, and use three decimals.
+
+Hops never reach the bridge: while taking turns the status stays 3 and both meters read 0.
 
 Before any measurement, and during a retune, `sdrradiosignal` and `sdrradiosnr` read 0,
 so a reading always belongs to the channel shown beside it.
@@ -121,6 +154,8 @@ and a full card still plays.
 | 1 | 2 | SDR unavailable: missing, unplugged or in use by another program | Retries every 5 s |
 | 2 | 4 | ALSA device unavailable, for example busy | Keeps receiving and recording, retries every 5 s |
 | 3 | 8 | Cannot record: folder missing, read-only or too full | Keeps playing, retries at the next transmission |
+| 4 | 16 | `sdrradiofreqsecondary` is not a channel | Stays on the primary until a valid value arrives |
+| 5 | 32 | The tuner failed to hop | Stays on the primary, retries every 5 s |
 
 Bits 2 and 3 clear themselves when the output is no longer wanted.
 
@@ -180,9 +215,12 @@ to do: TD1 in [tech-debt.md](tech-debt.md).
 ## 6. Screen checklist
 
 - Frequency selector that skips names ending 20, 45, 70 and 95, and that sends 0 for off.
+- Below 118 MHz, a selector on the 50 kHz grid.
 - Volume and squelch sliders, with a "squelch test" position at 0.
 - Show `sdrradiofreqactive`, not the value you sent: it is what the radio is really on.
 - Status light from `sdrradiostatus`, with activity from `sdrradiosquelchopen`.
+- With dual watch, mark the channel in `sdrradiofreqheard`, and warn if `sdrradiosecondaryactive`
+  is 0 while a secondary was sent.
 - Signal bar from `sdrradiosnr`, drawn on the same scale as the squelch, so the pilot can
   see where the threshold sits.
 - A message for each `sdrradiofault` bit.
@@ -195,7 +233,13 @@ to do: TD1 in [tech-debt.md](tech-debt.md).
 Additive keys only within v1.x. Consumers ignore keys they do not know. The bridge
 carries every addon's keys, and the daemon does the same.
 
-## 8. Limits
+## 8. Changes
+
+| Version | Change |
+|---|---|
+| 1.1 | Navaid band 108.000 to 117.950. Dual watch: `sdrradiofreqsecondary`, `sdrradiosecondaryactive`, `sdrradiofreqheard`, fault bits 4 and 5. `sdrradiosnr` measures the carrier, so noise alone reads 0 |
+
+## 9. Limits
 
 Supplemental, non-required equipment. A receive-only monitor, not a certified COM radio
 and no substitute for one.

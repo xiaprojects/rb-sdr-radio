@@ -1,5 +1,5 @@
 # RB-SDR-Radio airband receiver.
-# Installed by install.sh to /etc/systemd/system/rb-sdr-radio.service
+# Installed by install.sh to /lib/systemd/system/rb-sdr-radio.service
 #
 # Runs as pi, like rbvoice, so that both see the same ALSA configuration: a dmix in
 # ~/.asoundrc belongs to the user who created it, and a second user cannot join it.
@@ -13,8 +13,8 @@ Wants=network-online.target
 [Service]
 Type=notify
 NotifyAccess=main
-ExecStart=/usr/bin/python3 -m rbsdrradio --config /etc/rb-sdr-radio/rb-sdr-radio.json
-WorkingDirectory=/opt/rb-sdr-radio
+ExecStart=/usr/bin/python3 -m rbsdrradio --config /boot/firmware/rb/rb-sdr-radio.json
+WorkingDirectory=/opt/addons/rb-sdr-radio
 Environment=PYTHONUNBUFFERED=1
 # aplay reaches a PipeWire-based ALSA default through the user's runtime directory.
 Environment=XDG_RUNTIME_DIR=/run/user/1000

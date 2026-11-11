@@ -1,5 +1,6 @@
 """The command-line antenna tests, through the real entry point."""
 
+import re
 import stat
 import time
 import wave
@@ -15,6 +16,7 @@ from rbsdrradio.bench import (
     EXIT_NO_SIGNAL,
     EXIT_OK,
     BenchRequest,
+    run_dual_test,
     run_test,
 )
 from rbsdrradio.dsp import AM_AUDIO_HZ, FM_AUDIO_HZ, FS_HZ, TUNER_OFFSET_HZ
@@ -192,6 +194,17 @@ def test_no_audio_leaves_alsa_alone(cfg):
     assert rc == EXIT_OK
 
 
+def test_an_empty_audio_device_is_said_and_left_alone(cfg):
+    device = device_for(synth.am(1.0, -30.0) + synth.noise(1.0, -50.0))
+    lines = []
+    none = cfg.with_overrides(audio={"device": "", "player": "/nonexistent/aplay"})
+    rc = run_test(none, BenchRequest("am", 118.7, seconds=0.6), opener=lambda c: device,
+                  out=lines.append)
+    assert rc == EXIT_OK
+    assert any("audio.device is empty" in line for line in lines)
+    assert not any("cannot start" in line for line in lines)
+
+
 def test_no_sound_card_still_measures(cfg):
     device = device_for(synth.am(1.0, -30.0) + synth.noise(1.0, -50.0))
     lines = []
@@ -309,6 +322,41 @@ def test_overrides_reach_the_config():
     assert by_index.sdr["device_index"] == 1 and by_index.sdr["gain_mode"] == "agc"
 
 
+def test_detector_and_noise_reduction_can_be_tried_from_the_command_line(tmp_path, capsys):
+    rc = main(["test-am", "118.7", "--replay", str(am_capture(tmp_path)),
+               "--detector", "synchronous", "--noise-reduction", "12"])
+    out = capsys.readouterr().out
+    assert rc == EXIT_OK
+    assert "detector    synchronous, noise reduction 12 dB" in out
+
+
+def test_the_bench_says_which_detector_it_used(tmp_path, capsys):
+    main(["test-am", "118.7", "--replay", str(am_capture(tmp_path))])
+    assert "detector    envelope, noise reduction off" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("value", ["-1", "21", "loud"])
+def test_noise_reduction_outside_its_range_is_refused(value, capsys):
+    with pytest.raises(SystemExit):
+        main(["test-am", "118.7", "--noise-reduction", value])
+    assert "noise-reduction" in capsys.readouterr().err
+
+
+def test_demod_overrides_leave_the_loaded_config_alone():
+    from argparse import Namespace
+
+    from rbsdrradio.__main__ import _bench_config
+    from rbsdrradio.config import load
+    base = load()
+    args = Namespace(gain=None, ppm=None, device=None, detector="synchronous",
+                     noise_reduction=6.0)
+    c = _bench_config(base, args)
+    assert c.demod == {"detector": "synchronous", "noise_reduction_db": 6.0}
+    assert base.demod == {"detector": "envelope", "noise_reduction_db": 0}
+    dual = _bench_config(base, Namespace(gain=None, ppm=None, device=None))   # test-dual
+    assert dual.demod == base.demod
+
+
 def test_a_typed_value_replaces_only_that_key_of_the_tuner_profile():
     """An inverted dongle must stay swapped under --gain, or the test hears only the mirror."""
     from argparse import Namespace
@@ -352,3 +400,30 @@ def test_version(capsys):
 
 def test_block_constant_is_the_shipped_one(cfg):
     assert cfg.sdr["block_samples"] == BLOCK
+
+
+# -- dual watch soak ---------------------------------------------------------------- #
+
+def dual_opener():
+    def read(n):
+        time.sleep(n / FS_HZ)
+        return synth.noise(n / FS_HZ, -60.0).astype(np.complex64)[:n]
+    return lambda cfg: FakeDevice(read)
+
+
+def test_dual_soak_reports_the_hops(cfg):
+    lines = []
+    code = run_dual_test(cfg, 118.7, 121.5, 1.0, 10, opener=dual_opener(), out=lines.append)
+    text = "\n".join(lines)
+    assert code == EXIT_OK, text
+    assert re.search(r"hops [1-9]\d*, failed 0", text)
+    assert "cycle" in text
+
+
+def test_dual_soak_fails_on_a_device_that_does_not_open(cfg):
+    def refuse(cfg):
+        raise SdrError("in use")
+    lines = []
+    code = run_dual_test(cfg, 118.7, 121.5, 2.0, 10, opener=refuse, out=lines.append)
+    assert code == EXIT_HARDWARE
+    assert "in use" in "\n".join(lines)

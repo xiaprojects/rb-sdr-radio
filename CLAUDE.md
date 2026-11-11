@@ -1,7 +1,7 @@
 # RB-SDR-Radio
 
-Airband AM receiver for RB-Avionics: RTL-SDR in, ALSA and WAV out, driven by RB-01's
-float bridge. `README.md` is for builders, `docs/RB-SDR-RADIO-IF-v1.0.md` is the contract
+Airband AM receiver for RB-Avionics, from the VOR band up: RTL-SDR in, ALSA and WAV out,
+driven by RB-01's float bridge. `README.md` is for builders, `docs/RB-SDR-RADIO-IF-v1.1.md` is the contract
 with RB-01, whose radio screen is developed in a separate session, and `docs/tech-debt.md`
 holds what is known and deferred. Sibling projects are in `../`: `rb-vor` (the pattern this
 follows), `roastbeef` (RB-01), `rbvoice`.
@@ -56,20 +56,60 @@ python3 -m rbsdrradio self-test
   spurs stay put. The energy comparison this replaced told a healthy R820T to set `swap_iq`:
   106.7 MHz had faded and 106.2 MHz, a different station, is exactly on its mirror. `swap_iq`
   then appeared to work because it demodulated that station.
-- **Python**, like rb-vor. AM costs 1.4 ms per 32 ms block at full clock on x86 (4.5 %).
+- **Python**, like rb-vor. AM costs 1.6 ms per 32 ms block at full clock on x86 (5 %),
+  about 1.8 with noise reduction or the synchronous detector and 2.0 to 2.3 with both.
   `top` shows 20 to 35 % there, but that is the same work at the 500 to 800 MHz `schedutil`
-  picks for a light load, not a problem. Not yet measured on a Pi.
+  picks for a light load, not a problem. Not yet measured on a Pi: `python3 -m
+  tools.cpu_cost` in `/opt/addons/rb-sdr-radio` does it.
 - **ctypes, not pyrtlsdr or SoapySDR.** pyrtlsdr fails at import on a stock librtlsdr
   (`rtlsdr_set_dithering`, rb-vor A27) and would need pip on a managed Python.
 - **`aplay` child process, not an ALSA binding.** Process exit is an absolute release, and
   a stuck sound device cannot stall the sample path.
 - **Noise floor from the median of a periodogram around the channel**, not remembered from
   quiet moments. A remembered floor learns ATIS as noise and mutes it.
+- **AM S/N is the carrier, not the channel power.** Five Hann bins of the strongest carrier
+  within the channel filter's pass edge, over the channel noise, from a periodogram every
+  block. Flight tests, 2026-11-10: 3 dB of squelch stayed open, 4 dB lost calls. Channel
+  power read 2 to 3 dB with no station whenever the noise was a little stronger inside
+  the channel than beside it; the carrier reads 0 there. It also found that 3 dB of
+  hysteresis under 3 dB could never shut, since S/N never reads below 0: hysteresis is
+  now at most half the threshold. Costs about 0.2 ms more per block.
+- **Dual watch does not interrupt a transmission on the secondary.** Stefano's call,
+  2026-11-10: each look back was a pop every second in the call. Looks happen in the hold,
+  or once a transmission outlasts `dual.uninterrupted_s` (30 s), so an ATIS still cannot
+  shut the primary out for good. The study's rule of looking back throughout is amended.
+- **Empty `audio.device` is no sound card**, the shipped value: a Raspberry Pi 5 has none.
+  Never opened, never a fault. The `cfg` test fixture sets `default`, because most tests
+  are about the audio.
+- **Pops are logged.** A dropped block (card behind) and an aplay underrun (card ahead)
+  are warnings, counted, at 1, 10, 100 and every 1000.
 - **Software volume.** The sound device is shared; the radio must not move its mixer.
 - **WAV at 16 kHz.** `radio.js` estimates length as `Size / 30000`.
 - **Recordings in `/opt/stratux/www/playback`.** Builders and the image build script
   symlink it to dedicated USB storage, never the boot partition. Nothing here creates that
   link. `pi` owns the folder, so the service needs no capabilities.
+- **Dual watch hops in the reader thread**, between reads, from a one-slot request. A hop
+  blocks for 29 ms, 20 times a second. With no secondary the whole of it stays out of the
+  way: `Controller.watch` is None, and a test pins that the reader never resets its buffer.
+- **`dualwatch.py` decides and the controller moves the tuner.** Pure and clock-injected, so
+  the study's table in section 3.2 runs without a radio.
+- **An FC0012 runs dual watch unmeasured, with a log warning.** Stefano's call, 2026-11-06:
+  the aircraft has one, and the study's figures for it remain estimates.
+- **Voice band 300 to 2700 Hz, eighth-order elliptic.** The third-order 300-3400 Hz
+  filter let hiss through to 6 kHz on the hangar recordings of 2026-11-08. COM receivers
+  are specified for about 350 to 2500 Hz. Then a soft limiter, and the ratio to the
+  carrier bounded at 1.5, which ended the full-scale click when a carrier jumps up.
+- **Hiss on weak signals is RF, not DSP.** Those recordings had the carrier about 5 dB
+  over the noise in the 25 kHz channel. At that level the narrower audio band gained
+  1.1 dB and a synchronous detector 0.6 dB more, in simulation through the real chain.
+  Antenna, gain and interference are worth more than any detector.
+- **Noise reduction and the synchronous detector are options, off by default**
+  (`demod` section). Noise reduction trades about 1 dB of clarity for quiet between
+  words. It takes the noise from the meter's `sigma2`, never from the audio, for the
+  same reason as the noise floor (ATIS). The synchronous detector follows one carrier
+  of several, so it stays off until tried on air. The dual watch look uses neither.
+- **The VOR band is not recorded.** Its carrier never stops, so it would push real traffic
+  out of the quota, for the same reason as the squelch held open.
 - **Interpretation:** "a command like test" was read as command-line tests, so `test-fm`
   and `test-am` are CLI, not bridge commands.
 
@@ -80,5 +120,8 @@ normal, an AM carrier received on 124.200 MHz, voice not confirmed. No FC0012 ha
 connected. See the table at the end of `README.md`. Still open: whether the FC0012 needs
 `swap_iq` (rb-vor O21, `test-fm` reports it), real sensitivity, and whether the default
 squelch of 10 dB suits a real cockpit. Indoors it stayed shut on real AM, which is one site
-and no reason to change it yet. Sessions may share the dongle: `usb_claim_interface error
+and no reason to change it yet. On 2026-11-08 the RB-01 in a hangar, with its antenna,
+recorded voice on 125.600 under heavy hiss (carrier about 5 dB over the noise). The
+2.7 kHz voice band, noise reduction and the synchronous detector are simulated only.
+Sessions may share the dongle: `usb_claim_interface error
 -6` with no `Detached kernel driver` line means another program holds it.
