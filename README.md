@@ -358,3 +358,17 @@ and `rest_url` in a copy of the config at `localhost:8099`.
 | FC0012 | ladder, AGC and tuning read from the librtlsdr 2.0.2 source, stand-in, simulated zero-IF artefacts | **no** |
 | CPU on a Raspberry Pi | not yet; 5 to 7 % of a core on x86. `python3 -m tools.cpu_cost` measures it | **no** |
 | systemd unit, `install.sh` on a Pi | syntax-checked only | **no** |
+
+## License
+
+RB-Avionics is open source and open design. This repository is dual-licensed by XIAPROJECTS SRL:
+
+1. **GNU Affero General Public License v3.0** (`AGPL-3.0-only`): the community edition, free for all
+   builders and personal use. The full text is in [LICENSE](LICENSE). If you distribute this software or a
+   modified version, or let others use a modified version over a network, you must offer them its
+   complete source code under the same licence.
+2. **Commercial licence** from XIAPROJECTS SRL, for products and services that cannot meet the
+   AGPL-3.0 terms, for example closed-source devices, firmware or services. Ask through
+   [www.rbavionics.com](https://www.rbavionics.com) or the [Discord community](https://discord.gg/G4u6kjmrUG).
+
+Copyright © 2026 XIAPROJECTS SRL.
